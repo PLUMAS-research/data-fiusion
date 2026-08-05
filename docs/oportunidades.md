@@ -58,24 +58,37 @@ NMF de `sklearn` da 0.184, así que agrupar los términos no cuesta calidad ahí
 Queda pendiente barrer el peso de la relación de etiquetas con anclaje activado, porque
 el óptimo puede no ser el mismo que sin él.
 
-### Máscaras por entrada, no por fila
+### Máscaras por entrada (implementado)
 
-Hoy la granularidad es la fila completa. Falta el caso de una fila parcialmente
-observada: se conocen algunas entradas y el resto es desconocido, no cero.
+`Relation(entry_weights=..., background=...)` da la granularidad por entrada: cada
+entrada almacenada lleva un peso $w_{ab}$ y las no almacenadas un peso de fondo $w_0$
+(retroalimentación implícita, Hu, Koren y Volinsky). Peso cero oculta la entrada del
+ajuste por todas las vías (pérdida, escala e inicialización, verificado a $10^{-12}$
+en `tests/test_pesos.py`). La primitiva SDDMM que esto exige está en `ops.py`.
 
-La formulación es la de retroalimentación implícita (Hu, Koren y Volinsky): cada entrada
-tiene un peso $w_{ab}$, con $w_0$ de fondo para las no observadas. La actualización
-correcta separa el término de fondo, que sigue siendo un producto denso barato, del
-término de corrección sobre las entradas observadas, que es un SDDMM (producto
-denso muestreado en el patrón disperso).
+Dos decisiones de la implementación que conviene conocer:
 
-Medido: el análisis encontró que una versión ingenua de esta actualización parte el
-signo del producto y pierde el piso positivo del denominador, divergiendo a NaN cuando
-$w_0 = 0$. La fórmula correcta quedó registrada.
+- La actualización de $G$ usa la fórmula registrada por el análisis (separar el signo
+  de la matriz cuadrática, no del producto), que mantiene el piso positivo del
+  denominador; la versión ingenua diverge a NaN con $w_0 = 0$ y hay un test que cubre
+  ese régimen.
+- $S$ pierde el solve cerrado. Se actualiza con un paso precondicionado amortiguado
+  cuyo punto fijo satisface las ecuaciones normales ponderadas y que se reduce
+  exactamente al solve cerrado con pesos uniformes. Los pesos se normalizan al máximo
+  (la magnitud se pliega en el peso de la relación) para que la iteración quede
+  contraída.
 
-Costo: `scipy` no tiene primitiva de SDDMM, así que hay que escribirla. La estimación
-del análisis fue +50% de tiempo por iteración sobre la relación grande. Se difirió por
-eso, no porque esté mal.
+La reconstrucción solo se evalúa donde $w_{ab} \neq w_0$, así que el sobrecosto
+depende del régimen. Medido sobre una relación de 200k por 5k con 5M de entradas
+(8 iteraciones, rangos 20 y 15): ruta clásica 5.1 s; entradas retenidas al 10%,
+1.9x; régimen implícito (delta denso en el patrón), 5.2x, dominado por tres pasadas
+de recolección por iteración (actualización de S, de G y pérdida) a ~0.5 Gflop/s
+contra productos BLAS.
+
+Pendiente de esta línea: soporte en `transform`, combinar `entry_weights` con `rows`
+en la misma relación, cachear entre pasadas la reconstrucción sobre el soporte de
+delta, y un kernel compilado para el SDDMM si el régimen implícito se vuelve el
+caso dominante.
 
 ### Consistencia entre el ajuste y el fold-in (`alpha_consistency`)
 
@@ -96,16 +109,16 @@ Conjetura, no medida: debería ayudar de verdad cuando la suma de $n_{dst}$ es m
 menor que $n_t$, es decir cuando hay muchas entidades descritas por pocos atributos.
 En MovieLens esa condición no se cumple y el held-out quedó plano.
 
-### Validación interna con entradas retenidas
+### Validación interna con entradas retenidas (implementado)
 
-Hoy la única forma de validar es reservar entidades completas y proyectarlas. No hay
-manera de retener *entradas sueltas* dentro de una relación para medir el error de
-reconstrucción sobre ellas durante el ajuste.
+`holdout_entries(matrix, fraction)` retiene un subconjunto aleatorio de las entradas
+almacenadas (peso cero), y `FusionModel.reconstruct_entries(nombre, filas, columnas)`
+las puntúa tras el ajuste, en unidades originales y en O(k por rango). Con eso el
+error de validación por entradas queda disponible sin reservar entidades completas.
 
-Con máscaras por entrada, esto sale casi gratis: se retiene un porcentaje de las
-entradas observadas, se ajusta sin ellas y se evalúa ahí. Habilita parada temprana por
-error de validación en vez de por tolerancia sobre la pérdida de entrenamiento, que es
-lo que hacen las librerías de factorización maduras.
+Pendiente: parada temprana por ese error durante el ajuste. El `callback` actual
+recibe (iteración, pérdida, G) pero no S, así que no puede puntuar entradas; hay que
+pasarle S o incorporar la validación al loop.
 
 ## Rendimiento del bucle de ajuste
 
@@ -161,8 +174,80 @@ memoria, que es justamente lo que se quiere evitar.
 ## Selección de rango
 
 El rango es la palanca principal de regularización y hoy se elige por barrido manual.
-Con validación por entradas retenidas se podría automatizar, o al menos reportar una
-curva de error de validación contra rango en una sola corrida.
+Con `holdout_entries` más `reconstruct_entries` la curva de error de validación contra
+rango ya es medible por corrida; falta el helper que haga el barrido y reporte la
+curva, y la parada temprana anotada arriba.
+
+## Likelihoods de conteo (Poisson, negative binomial)
+
+Las relaciones típicas del dominio objetivo son conteos sobredispersos, y la pérdida
+cuadrática es la likelihood gaussiana. El orden de trabajo, con criterio de éxito
+declarado antes de cada paso:
+
+1. **Baseline medido** (`examples/newsgroups/conteos.py`): sobre 20 Newsgroups con
+   conteos crudos (índice de dispersión 283), la cuadrática da ARI 0.026;
+   estabilizar varianza sube a 0.103 con sqrt y 0.114 con log1p; TF-IDF llega a
+   0.185. La referencia a ganar para una likelihood de conteo es TF-IDF, no los
+   conteos crudos, y TF-IDF no es estabilización de varianza sino reponderado por
+   especificidad: un modelo Poisson que no incorpore ese reponderado parte en
+   desventaja. Las transformaciones ganadoras quedaron después declarables en el
+   modelo (`Relation(preprocess=...)`), con el estado (idf) persistido y reaplicado
+   a datos no vistos por `transform` y `loss`.
+2. **Poisson/KL por relación (implementado)**: `Relation(family="poisson")` despacha
+   a un loop KL propio (`poisson.py`), con actualizaciones multiplicativas cuyo
+   numerador y denominador se acumulan entre las relaciones de cada tipo (el paso
+   conjunto desciende la pérdida conjunta), $S$ no negativo, el gauge compensado en
+   $S$ y la pérdida como razón de desviación contra el modelo nulo de tasa
+   constante. El experimento contra la vara cuadrática está en
+   `examples/newsgroups/poisson_vs_cuadratica.py`.
+   **Medido, y el criterio no se cumplió**: Poisson sobre conteos crudos da ARI
+   0.113 (el nivel de log1p bajo la cuadrática, 0.114); con columnas escaladas por
+   idf sube a 0.151 y empata estadísticamente con la vara (-1.3 SE); sobre TF-IDF
+   normalizado degenera. La likelihood compra lo que la transformación compra, el
+   reponderado por especificidad es la pieza que importa bajo ambas pérdidas, y no
+   hay razón medida para preferir Poisson en agrupamiento de texto. El paso
+   siguiente (familias mezcladas) se midió aparte y tampoco superó a la
+   cuadrática; ver abajo.
+   **Familias mezcladas: implementado y medido.** Un fit puede combinar relaciones
+   Poisson y gaussianas compartiendo factores (la línea de collective matrix
+   factorization de Singh y Gordon; verificar la referencia antes de citarla). El
+   paso conjunto minimiza la suma de los majorizantes de ambas familias en forma
+   cerrada (raíz positiva de una cuadrática por entrada) y se reduce exactamente a
+   cada regla pura en los casos extremos. Medido en Last.fm (`examples/lastfm/`),
+   con criterio declarado (ganar por 2 SE en AP de tags retenidos): el brazo
+   mezclado (Poisson crudo más etiquetas gaussianas) pierde contra la monofamilia
+   con log1p por $-0.050 \pm 0.017$ ($-2.9$ SE), con ambos brazos sobre el
+   baseline de popularidad. La corrida destapó y corrigió un defecto real: sin
+   calibrar el gradiente KL por la desviación nula de su relación, el término de
+   conteos aplasta a cualquier gaussiana y el peso entre familias no tiene efecto.
+   Conclusión de la línea de conteos completa: en dos datasets y tres protocolos,
+   modelar conteos con su likelihood nunca superó a transformarlos bajo la
+   cuadrática. La infraestructura queda (familia por relación, calibración entre
+   familias) para cuando un caso la exija por razones de modelo (tasas,
+   interpretación generativa), no de accuracy.
+   Pendiente de esta línea: `transform` bajo KL, y máscaras o pesos por entrada
+   sobre la relación Poisson misma (el peso de fondo $w_0$ daría el régimen
+   implícito también aquí).
+3. **Negative binomial solo con evidencia**: medir la sobredispersión condicional
+   bajo el modelo Poisson ya ajustado (varianza contra media) y agregar el parámetro
+   de dispersión por relación solo si Poisson falla de forma visible. Con Poisson
+   empatando o perdiendo contra la cuadrática transformada en todos los protocolos
+   medidos, esta línea queda en baja prioridad.
+
+## Criterio de parada por fila en el refinado no negativo
+
+`nonneg_refine` detiene la iteración por el cambio máximo del bloque completo, así que
+las filas fáciles quedan acopladas a la fila que converge más lento. En `transform` con
+máscaras cada patrón de observación se refina por separado, y el número de iteraciones
+de un grupo de filas puede depender de junto a quiénes se refinó. Con un criterio por
+fila (congelar las filas ya convergidas) el resultado sería independiente de cómo se
+agrupan. Costo: tocar `core.py`, que hoy comparte esta función entre las dos rutas.
+
+## Integración continua
+
+Un workflow de GitHub Actions que corra `pytest` en cada push. La suite corre sin
+descargas ni credenciales, y la comparación con scikit-fusion se salta sola si no está
+instalado, así que no hay bloqueo técnico. Pendiente por decisión del mantenedor.
 
 ## Lo que se probó y no funcionó
 
@@ -182,3 +267,6 @@ Registrado para no volver a intentarlo sin una razón nueva.
 - **`LinearOperator` para abaratar la inicialización**: no redujo la memoria, porque el
   consumo estaba en el subespacio de Krylov de ARPACK y no en la concatenación. La
   solución que sí funcionó fue resolver por el lado chico.
+- **KL sobre TF-IDF normalizado por fila**: la KL modela masa y la normalización L2
+  la elimina; el ajuste degenera en 2 iteraciones con ARI 0.000. Los pesos por
+  columna (idf) sí son compatibles con KL, escalando la matriz.

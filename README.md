@@ -66,7 +66,10 @@ proba = derivado.predict_proba(target="genero", views=["generos"])
 
 `transform` devuelve un modelo derivado que comparte todo salvo el factor proyectado,
 así que compone directamente con `predict_proba`. La solución es no negativa, como los
-factores que produce el ajuste.
+factores que produce el ajuste. Honra `Relation.rows` con la misma semántica que `fit`:
+cada entidad nueva se resuelve solo desde las relaciones donde fue observada. Las
+entidades nuevas sin ninguna observación quedan con factor cero, generan un aviso y
+aparecen en `empty_rows` del modelo derivado.
 
 ### Observaciones faltantes
 
@@ -80,6 +83,80 @@ Relation(src="pelicula", dst="genero", matrix=Y, rows=indices_etiquetados)
 
 Esto es lo que hace posible un régimen semi-supervisado: se ajusta con todas las
 entidades presentes, pero solo las etiquetadas aportan su etiqueta.
+
+### Pesos por entrada y entradas retenidas
+
+`Relation.rows` opera por fila completa. `entry_weights` baja a la entrada: cada
+entrada almacenada lleva un peso (alineado con `matrix.data`) y las no almacenadas
+un peso de fondo `background`. Peso cero oculta la entrada del ajuste por todas las
+vías (pérdida, escala e inicialización), lo que da validación con entradas retenidas
+sin reservar entidades completas:
+
+```python
+from datafiusion import holdout_entries
+
+pesos, (filas, columnas) = holdout_entries(M, fraction=0.1, random_state=0)
+modelo = fit({"ratings": Relation(src="usuario", dst="pelicula", matrix=M,
+                                  entry_weights=pesos)}, ranks)
+pred = modelo.reconstruct_entries("ratings", filas, columnas)
+```
+
+`background` controla qué son los ceros no almacenados: `1.0` mantiene la semántica
+usual (cada cero es una observación), `0.0` los ignora, y valores intermedios los
+leen como negativos débiles, que es el régimen de retroalimentación implícita de Hu,
+Koren y Volinsky. Pesos mayores que uno marcan entradas más importantes.
+
+### Transformaciones que viajan con el modelo
+
+Las transformaciones de valores que ganaron en los experimentos (log1p, idf) se
+declaran en la relación y pasan a ser parte del modelo:
+
+```python
+Relation(src="artista", dst="usuario", matrix=escuchas, preprocess="log1p")
+Relation(src="documento", dst="termino", matrix=conteos, preprocess=("log1p", "idf"))
+```
+
+El registro es cerrado (`log1p`, `sqrt`, `anscombe` desplazada, `idf`) porque los
+nombres y el estado persisten con `save`. La diferencia con transformar afuera está
+en los datos no vistos: `FusionModel.transform` y `loss` reaplican la misma cadena a
+datos crudos entrantes, y el idf que usan es el aprendido en el entrenamiento, no
+uno recalculado sobre el lote nuevo. Es la misma clase de error silencioso de
+unidades que el modelo ya cierra con la escala Frobenius, cerrada ahora para las
+transformaciones. La matriz del usuario nunca se modifica, y
+`reconstruct_entries(..., original=True)` invierte la cadena para leer
+reconstrucciones en unidades originales (aproximación legible, no la media
+condicional).
+
+### Relaciones de conteo
+
+`Relation(..., family="poisson")` cambia la pérdida de esa relación a la divergencia
+KL generalizada, la likelihood de Poisson para conteos. El costo sigue siendo O(nnz
+por rango): la masa total de la reconstrucción colapsa a tamaño rango por las sumas
+de columna, y el término logarítmico solo se evalúa en las entradas almacenadas.
+
+Dos consecuencias del cambio de pérdida: el backbone $S$ pasa a ser no negativo (la
+reconstrucción debe ser positiva) y se actualiza de forma multiplicativa, y los datos
+no se normalizan por Frobenius (el balance entre relaciones se controla con
+`weights`). La pérdida reportada es la razón de desviación
+KL(X||R) / KL(X||tasa constante): 0 es ajuste perfecto y 1 es el modelo nulo.
+
+Las familias se pueden mezclar en un fit: una relación de conteos Poisson junto a
+relaciones gaussianas (con sus máscaras y pesos por entrada), compartiendo factores.
+El paso conjunto minimiza la suma de los majorizantes de ambas familias en forma
+cerrada, y se reduce a la regla clásica sin Poisson y a la regla KL sin gaussianas.
+El balance entre familias no tiene unidad natural, así que el peso relativo entre
+una relación Poisson y una gaussiana se valida, no se hereda.
+
+Con Poisson no están disponibles todavía `transform`, las máscaras de fila ni los
+pesos por entrada sobre la relación Poisson misma. Pesos por fila o columna (por
+ejemplo idf) se expresan escalando los datos: la KL ponderada por columna equivale a
+la KL sobre la matriz con las columnas escaladas.
+
+Medido en dos datasets (20 Newsgroups y Last.fm), modelar los conteos con su
+likelihood no superó a transformarlos (log1p, idf) bajo la cuadrática; los números y
+los protocolos están en `examples/newsgroups/README.md` y `examples/lastfm/README.md`.
+La familia existe para cuando el modelo de conteo se necesite por sus propiedades
+(tasas, interpretación generativa), no como palanca de accuracy.
 
 ### Entidades que se quedan sin datos
 
@@ -132,13 +209,15 @@ las componentes al género la destruye. En texto, la relación documento-términ
 única y las categorías sí corresponden al vocabulario, así que el anclaje agrega
 información. Ver `examples/newsgroups/README.md`.
 
-### Los tres mecanismos son independientes
+### Los mecanismos son independientes
 
-Se pueden combinar, y responden a preguntas distintas:
+Se pueden combinar (salvo `rows` con `entry_weights` en la misma relación, todavía),
+y responden a preguntas distintas:
 
 | Mecanismo | Pregunta que responde |
 |---|---|
 | `Relation.rows` | ¿esta fila fue observada en esta relación? |
+| `Relation.entry_weights` | ¿cuánto pesa esta entrada, y qué son los ceros? |
 | `supervision` | ¿qué componentes puede activar esta entidad? |
 | `empty_rows` | ¿quedó alguna entidad sin observación en ninguna parte? |
 
@@ -201,16 +280,29 @@ un margen amplio. Para **predecir** un atributo retenido, las dos quedan parejas
 anterior sale 0.010 de AP arriba en MovieLens. `fit` agrega además máscaras de
 observación, parada por tolerancia, y reanudación de ajustes largos.
 
+## Guía de uso
+
+`docs/guia-de-uso.md` recorre los flujos por tarea: preparar datos desde
+DataFrames, elegir transformaciones e hiperparámetros, evaluar sin engañarse,
+persistir y escalar a millones de entidades. Cada recomendación indica dónde está
+medida, y sus fragmentos de código corren tal como aparecen.
+
 ## Referencia de API
 
 | Función | Módulo | Qué hace |
 |---|---|---|
 | `fit(relations, ranks, ...)` | `model` | Ajusta y devuelve un `FusionModel`. |
 | `fit(..., supervision={tipo: L})` | `model` | Ancla componentes a etiquetas conocidas (TS-NMF). |
+| `fit(..., n_runs=k)` | `model` | Reinicios aleatorios; devuelve la corrida de menor pérdida. |
+| `Relation(..., family="poisson")` | `model` | Relación de conteos por KL generalizada. |
+| `Relation(..., preprocess="log1p")` | `model` | Transformación de valores que viaja con el modelo. |
 | `FusionModel.transform(relations, target)` | `model` | Proyecta entidades nuevas, sin refit. |
 | `FusionModel.predict_proba(target, views)` | `model` | Distribución sobre un tipo, combinando vistas. |
 | `FusionModel.loss(relations)` | `model` | Pérdida por la identidad de traza. |
+| `FusionModel.reconstruct_entries(name, rows, cols)` | `model` | Reconstrucción en coordenadas, unidades originales. |
 | `FusionModel.save/load/resume` | `model` | Persistencia y reanudación de un ajuste. |
+| `holdout_entries(matrix, fraction)` | `utils` | Retiene entradas para validación. |
+| `sddmm(pattern, A, B)` | `ops` | Producto de rango bajo muestreado en un patrón disperso. |
 | `dfmf_sparse(R, ranks, ...)` | `core` | Ruta anterior, congelada. |
 | `reconstruction_error(R, G, S)` | `core` | Suma de errores Frobenius relativos. |
 | `fold_in_entities(R_new, G, S, target_type)` | `core` | Fold-in de la ruta anterior. |
@@ -230,25 +322,39 @@ Los datos vienen incluidos con `scikit-fusion` (6.5 MB, sin descarga). Con
 `scikit-fusion` instalado se encuentran solos; si no, se apunta `MOVIELENS_DIR` al
 directorio del dataset.
 
+`examples/lastfm/` agrega el caso de familias mezcladas sobre conteos reales
+(Last.fm HetRec 2011, descarga de 2.5 MB, uso no comercial), y
+`examples/newsgroups/` el de semi-supervisión y likelihoods sobre texto.
+
 ## Tests
 
 ```bash
 uv run pytest
 ```
 
-47 tests. Cubren la identidad de traza contra el cálculo denso, la invariancia de la
-calibración a la escala de los datos, que el contenido de una fila enmascarada no
-afecte el ajuste, que el fold-in quede dentro del 0.5% del óptimo de
-`scipy.optimize.nnls`, la conservación de masa del término de grafo, y que la ruta
-congelada siga dando los mismos números.
+115 tests. Cubren la identidad de traza contra el cálculo denso, la familia Poisson
+(descenso monótono de la desviación, recuperación de bloques plantados, fusión
+mezclada con gaussianas), que el preprocesamiento declarado equivale al manual y
+reusa el idf del entrenamiento en datos nuevos, la invariancia de la
+calibración a la escala de los datos, que el contenido de una fila enmascarada o de
+una entrada con peso cero no afecte el ajuste, que el fold-in quede dentro del 0.5%
+del óptimo de `scipy.optimize.nnls`, la conservación de masa del término de grafo, el
+SDDMM contra el producto denso, la reducción exacta de los pesos uniformes a la ruta
+clásica, el roundtrip de guardado con supervisión, máscaras y grafos, las máscaras de
+fila en `transform`, y que la ruta congelada siga dando los mismos números.
 
-La comparación contra `scikit-fusion` está en `tests/test_compare_skfusion.py` y
-requiere instalarlo desde un checkout, porque no está en PyPI.
+La comparación contra `scikit-fusion` está en `tests/test_compare_skfusion.py`. Como
+test corre una versión reducida y se salta si `scikit-fusion` no está instalado (no
+está en PyPI; se instala desde un checkout). Como script imprime el reporte completo.
 
 ## Oportunidades de mejora
 
 `docs/oportunidades.md` documenta lo que falta y por qué, con lo que se sabe medido de
 cada cosa.
+
+## Licencia
+
+MIT. Ver `LICENSE`.
 
 ## Referencias
 
