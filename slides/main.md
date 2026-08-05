@@ -50,7 +50,7 @@ No sirve cuando:
 ## Ajuste mínimo {.smaller}
 
 ```python
-from datafiusion import Relation, fit
+from datafiusion import Relation, fuse
 
 relaciones = {
     "ratings": Relation(src="usuario", dst="pelicula", matrix=M_ratings),
@@ -58,7 +58,7 @@ relaciones = {
 }
 ranks = {"usuario": 15, "pelicula": 10, "genero": 6}
 
-modelo = fit(relaciones, ranks, max_iter=200, tol=1e-6)
+modelo = fuse(relaciones, ranks, max_iter=200, tol=1e-6)
 
 print(modelo.n_iter, modelo.stop_reason)   # 137 tol
 print(modelo.rel_error)                    # error por relacion
@@ -125,6 +125,24 @@ proyectado. Por eso se le puede pedir predicciones directamente.
 Se encarga solo de reaplicar el escalado que se usó al ajustar. Hacerlo a mano es la
 fuente de error más común, y falla en silencio.
 
+## Transformar los valores dentro del modelo {.smaller}
+
+Con conteos sobredispersos, la pérdida cuadrática sobre los valores crudos es la
+peor opción medida: las entradas de mayor magnitud dominan el ajuste. La transformación se
+declara en la relación y pasa a ser parte del modelo:
+
+```python
+Relation(src="usuario", dst="pelicula", matrix=M, preprocess="log1p")
+# registro: log1p, sqrt, anscombe, idf; componibles: ("log1p", "idf")
+```
+
+`transform` y `loss` reaplican la misma cadena a datos crudos nuevos, y el idf que
+usan es el aprendido en el entrenamiento, nunca uno recalculado sobre el lote
+nuevo.
+
+Ajustar sobre `log1p(X)` y proyectar `X` crudo era un error sin ningún aviso.
+Ahora no puede pasar: el estado viaja con el modelo, se guarda y se recarga.
+
 ## Datos parcialmente etiquetados {.smaller}
 
 Si solo algunas entidades tienen etiqueta, hay que decir **cuáles fueron observadas**.
@@ -136,7 +154,7 @@ relaciones["generos"] = Relation(
     src="pelicula", dst="genero", matrix=M_generos,
     rows=indices_etiquetadas,       # el resto no entra a la perdida
 )
-modelo = fit(relaciones, ranks=..., max_iter=200, tol=1e-6)
+modelo = fuse(relaciones, ranks=..., max_iter=200, tol=1e-6)
 ```
 
 Las filas fuera de `rows` no aportan nada al ajuste, y sus factores quedan determinados
@@ -157,7 +175,7 @@ siguiendo TS-NMF.
 permitido = np.ones((n_peliculas, 19), dtype=bool)
 permitido[etiquetadas] = Y[etiquetadas] > 0     # solo sus generos
 
-modelo = fit(relaciones, ranks={"pelicula": 19, ...},
+modelo = fuse(relaciones, ranks={"pelicula": 19, ...},
              supervision={"pelicula": permitido})
 ```
 
@@ -207,26 +225,47 @@ es la principal fuente de estructura**
 
 No cuando compite con otras que aportan estructura distinta.
 
-## Los tres mecanismos son independientes {.smaller}
+## Los mecanismos son independientes {.smaller}
 
 | Mecanismo | Pregunta que responde |
 |---|---|
 | `Relation.rows` | ¿esta fila fue observada en esta relación? |
+| `Relation.entry_weights` | ¿cuánto pesa esta entrada, y qué son los ceros? |
 | `supervision` | ¿qué componentes puede activar esta entidad? |
 | `empty_rows` | ¿quedó alguna entidad sin observación en ninguna parte? |
 
 Una fila de puros `True` en `supervision` significa "no sé en qué componentes carga",
 que no es lo mismo que "no hay datos". Por eso hacen falta los dos.
 
-El tercero es un aviso, no una entrada: `fit` levanta un `UserWarning` y deja los
+El último es un aviso, no una entrada: `fuse` levanta un `UserWarning` y deja los
 índices en `modelo.empty_rows`. Sin él, esas entidades quedan con el factor de la
 inicialización y `argmax` las manda a todas al mismo grupo, inflándolo en silencio.
 Pasa cada vez que un filtro aguas arriba deja entidades sin filas.
 
+## Retener entradas para validar {.smaller}
+
+`Relation.rows` opera por fila completa; `entry_weights` baja a la entrada: un peso
+por entrada almacenada y un peso de fondo `background` para las no almacenadas.
+Peso cero oculta la entrada del ajuste por todas las vías (pérdida, escala e
+inicialización, verificado a $10^{-12}$).
+
+```python
+pesos, (filas, columnas) = holdout_entries(M, fraction=0.1, random_state=0)
+rel = Relation(src="usuario", dst="pelicula", matrix=M, entry_weights=pesos)
+modelo = fuse({"ratings": rel}, ranks)
+pred = modelo.reconstruct_entries("ratings", filas, columnas)
+```
+
+Con eso la curva de validación contra el rango se mide por corrida, sin reservar
+entidades completas. Retener el 10% cuesta 1.9x en tiempo.
+
+`background` controla los ceros no almacenados: `1.0` los observa, `0.0` los
+ignora, intermedio los lee como negativos débiles (retroalimentación implícita).
+
 ## Ajustes largos {.smaller}
 
 ```python
-parcial = fit(relaciones, ranks=..., max_iter=500)
+parcial = fuse(relaciones, ranks=..., max_iter=500)
 parcial.save("modelo/")
 
 # despues, en otra sesion
@@ -235,8 +274,9 @@ modelo = FusionModel.load("modelo/")
 final = modelo.resume(relaciones, max_iter=500)   # continua, no reinicia
 ```
 
-`resume` reutiliza el escalado guardado en vez de recalcularlo, así que continuar sobre
-un subconjunto no cambia las unidades por accidente.
+`save` guarda la configuración completa (supervisión, máscaras, grafos,
+preprocesamiento y su estado), y `resume` la reaplica, así que reanudar con las
+mismas relaciones reproduce las mismas unidades sin repetir nada a mano.
 
 `modelo.history` tiene la pérdida en cada iteración: sirve para ver si ya convergió sin
 tener que volver a ajustar con otro `max_iter`.
@@ -327,15 +367,15 @@ apenas lo es.
 
 ## Qué ruta usar {.smaller}
 
-Hay dos formas de ajustar. `fit` es la actual; `dfmf_sparse` es la anterior y quedó
+Hay dos formas de ajustar. `fuse` es la actual; `dfmf_sparse` es la anterior y quedó
 congelada para que los resultados ya obtenidos sigan reproduciéndose.
 
 | Si tu objetivo es | Usa | Por qué |
 |---|---|---|
-| Agrupar entidades | `fit` | +0.18 de NMI sobre la anterior |
+| Agrupar entidades | `fuse` | +0.18 de NMI sobre la anterior |
 | Predecir un atributo | cualquiera | quedan parejas, la anterior 0.010 de AP arriba |
-| Datos parcialmente etiquetados | `fit` | es la única con máscaras |
-| Ajustes de horas | `fit` | tiene parada por tolerancia y `resume` |
+| Datos parcialmente etiquetados | `fuse` | es la única con máscaras |
+| Ajustes de horas | `fuse` | tiene parada por tolerancia y `resume` |
 | Reproducir un resultado anterior | `dfmf_sparse` | está congelada y fijada por test |
 
 ## {.image}
@@ -403,6 +443,70 @@ adjusted_rand_score(verdad[reservadas], grupos[reservadas])
 
 Todo esto sale de `examples/movielens/curvas.py`, que genera las dos figuras.
 
+# Conteos
+
+## Tres experimentos con criterio declarado {.smaller}
+
+Los conteos (viajes, reproducciones, palabras) son sobredispersos: en Last.fm la
+varianza de las reproducciones es 18 883 veces la media. La pregunta fue si
+conviene transformarlos bajo la pérdida cuadrática o modelarlos con su likelihood:
+
+```python
+Relation(src="artista", dst="usuario", matrix=escuchas, family="poisson")
+```
+
+La familia se declara por relación y se mezcla con relaciones gaussianas en el
+mismo ajuste, compartiendo factores. El criterio de cada experimento se declaró
+antes de correr: ganar por 2 SE.
+
+## Transformar gana a modelar {.smaller}
+
+Agrupar 20 Newsgroups contra sus categorías (ARI, 3 semillas):
+
+| variante | ARI |
+|---|---|
+| cuadrática, conteos crudos | 0.026 |
+| Poisson, conteos crudos | 0.113 |
+| cuadrática, log1p | 0.114 |
+| Poisson, idf | 0.151 |
+| cuadrática, TF-IDF | **0.185** |
+| Poisson sobre TF-IDF | degenera (0.000) |
+
+La likelihood incorpora por construcción la corrección que la transformación
+hace a mano, y da el mismo resultado (0.113 contra 0.114). El reponderado por
+idf mejora bajo ambas pérdidas, así que el efecto viene del reponderado y no de
+la forma de la pérdida. KL sobre datos normalizados por fila degenera, porque la
+KL modela masa y la normalización la elimina.
+
+## {.image}
+
+![](img/diagrama_lastfm.png)
+
+## Familias mezcladas en Last.fm {.smaller}
+
+La figura anterior es el esquema del caso, dibujado con `fusion_diagram`. La
+tarea: predecir los tags retenidos de cada artista, 4 semillas apareadas.
+
+| | AP en prueba |
+|---|---|
+| baseline de popularidad | 0.204 |
+| mezclado (Poisson + gaussiana) | 0.265 |
+| monofamilia (log1p) | **0.314** |
+
+El brazo mezclado pierde por 2.9 SE.
+
+La primera corrida además encontró un defecto real, ya corregido: sin calibrar
+el gradiente KL por su desviación nula, la relación de conteos domina
+numéricamente a la gaussiana y el peso entre familias no tiene ningún efecto.
+El síntoma fue una curva de validación plana: los cuatro pesos daban lo mismo.
+
+## La conclusión de los conteos {.statement}
+
+**Cuando hay conteos, es mejor usar log1p**
+
+La familia Poisson queda para cuando el modelo de conteo se necesita
+por sus propiedades, no para mejorar la precisión.
+
 # Errores que cuestan caro
 
 ## Cuatro cosas que fallan en silencio {.smaller}
@@ -417,9 +521,26 @@ lleva los factores a cero. Queda en 0 por defecto. Para regularizar, bajar el ra
 casi todo lo demás: `nndsvd` contra `random` son 0.25 de AP de diferencia, más que
 cualquier decisión de modelo.
 
-**Reescalar a mano las matrices al proyectar entidades nuevas.** Usar la norma de las
-matrices nuevas en vez de la del ajuste da factores equivocados sin ningún aviso.
-`transform` lo hace solo.
+**Reescalar o transformar a mano las matrices al proyectar entidades nuevas.** Usar
+la norma, el idf o la transformación del lote nuevo en vez de los del ajuste da
+factores equivocados sin ningún aviso. `transform` reaplica escala, pesos y
+`preprocess` solo.
+
+## Lo que ahora falla con error en vez de en silencio {.smaller}
+
+Una revisión adversarial del código encontró estos casos; todos tienen test.
+
+- Nombres de relación o tipo que no sirven como nombre de archivo (se usan en
+  `save`) se rechazan al construir.
+- `save` sobre un directorio ya usado lo limpia primero: antes, la configuración
+  de un modelo anterior se volvía a leer por sobre el `null` de `meta.json`.
+- Los escalares de numpy (`np.float32`, `np.int64`) en los hiperparámetros ya no
+  desaparecen de la metadata guardada.
+- `resume` de un modelo derivado por `transform` se rechaza: sus factores son de
+  otras entidades y el warm start corría sin aviso.
+- Declarar un `preprocess` distinto al del ajuste al proyectar se rechaza.
+- Las máscaras con duplicados se deduplican (el resultado dependía del tamaño de
+  bloque) y una máscara entera vacía ya no crashea.
 
 ## Cómo medir memoria sin engañarse {.smaller}
 
@@ -459,7 +580,7 @@ Agrupando películas en 19 grupos, contra los géneros como referencia:
 |---|---|---|
 | k-means sobre las mismas matrices | 0.083 | 0.015 |
 | `dfmf_sparse` | 0.579 | 0.464 |
-| `fit` | **0.756** | **0.741** |
+| `fuse` | **0.756** | **0.741** |
 
 NMI y ARI van de 0 (azar) a 1 (partición idéntica). La factorización agrupa mucho mejor
 que k-means sobre los mismos datos, que es el punto de usarla.
@@ -492,15 +613,14 @@ Si lo único que necesitas es predecir un atributo desde una matriz, empieza por
 y hay tres pasadas por matriz donde bastan dos. El techo de paralelizarlo está medido en
 3x, no más, porque la operación está limitada por acceso a memoria.
 
-**Máscaras por entrada, no por fila.** Hoy se puede decir "esta fila no fue observada",
-pero no "de esta fila conozco algunas entradas". Es lo que falta para el régimen
-semi-supervisado completo.
+**Parada temprana por error de validación.** Las entradas retenidas ya se pueden
+puntuar; falta engancharlas al loop de ajuste.
 
-**Validación interna.** Retener entradas sueltas durante el ajuste para parar cuando el
-error de validación deja de bajar, en vez de cuando la pérdida de entrenamiento se
-estanca.
+**`transform` bajo Poisson**, y máscaras o pesos por entrada sobre la relación
+Poisson misma.
 
-**Ingesta desde DataFrames** sin pasar por una matriz densa.
+**Ingesta desde DataFrames** sin pasar por una matriz densa, y la brecha de 1.6%
+entre las dos rutas, con su sospechoso anotado.
 
 `docs/oportunidades.md` tiene el detalle, incluido lo que ya se probó y no funcionó,
 para no repetirlo.
@@ -509,11 +629,13 @@ para no repetirlo.
 
 | Quiero | Archivo |
 |---|---|
-| Usar la librería | `README.md` |
-| Un caso completo con datos reales | `examples/movielens/README.md` |
-| Ver cómo se agrupa y se evalúa | `examples/movielens/clustering.py` |
-| Datos parcialmente etiquetados | `examples/semi_supervised.py` |
+| Usar la librería, por tarea | `docs/guia-de-uso.md` |
+| La API completa | `README.md` |
+| Un caso completo con verdad de referencia | `examples/movielens/README.md` |
+| Semi-supervisión y conteos en texto | `examples/newsgroups/README.md` |
+| Familias mezcladas con datos reales | `examples/lastfm/README.md` |
 | Saber qué falta y qué se descartó | `docs/oportunidades.md` |
 | Entender por qué el diseño es así | `docs/diseno-regularizacion.md` |
 
-Todo lo medido acá se reproduce corriendo los scripts de `examples/movielens/`.
+Los fragmentos de la guía corren tal como aparecen, y cada número de estas slides
+se reproduce con un script de `examples/`.
