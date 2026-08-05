@@ -67,6 +67,30 @@ print(modelo.rel_error)                    # error por relacion
 Las matrices son `scipy.sparse`. Los nombres de las relaciones importan: son los que se
 usan después para pedir predicciones o proyectar entidades nuevas.
 
+## De DataFrames a relaciones alineadas {.smaller}
+
+Los datos reales suelen venir como tablas largas, no como matrices. El constructor
+resuelve el vocabulario de cada tipo una sola vez (unión ordenada de lo que aparece,
+o una lista fijada), así que un tipo compartido ocupa las mismas posiciones en todas
+las relaciones sin reindexar nada a mano.
+
+```python
+from datafiusion import relations_from_frames
+
+relaciones = relations_from_frames({
+    "ratings": dict(frame=df_ratings, src="usuario", dst="pelicula", value="nota"),
+    "generos": dict(frame=df_generos, src="pelicula", dst="genero"),
+})
+```
+
+Los pares duplicados se suman (`value=None` cuenta ocurrencias). Los desajustes
+fallan nombrando las categorías: `on_unknown` decide qué pasa con una categoría
+fuera de un vocabulario fijado (error, agregarla al final, descartar la fila con
+aviso) y `on_missing` con una categoría sin observaciones (fila vacía o error).
+
+Para proyectar un lote nuevo, el vocabulario del lado ajustado se fija con el del
+modelo: `vocabularies={"pelicula": modelo.index["pelicula"]}`.
+
 ## Agrupar entidades {.smaller}
 
 ```python
