@@ -1,0 +1,34 @@
+"""Sparse data fusion by non-negative matrix tri-factorization.
+
+Two entry points coexist.
+
+`fit` is the current one. It takes named relations, returns a
+`FusionModel` that carries the fit-time scaling along with the factors,
+and offers row observation masks, a column gauge, graph smoothing
+calibrated against the data, a loss trace and a stopping tolerance. Its
+loss never materializes a matrix of relation size, so it is the one to
+use on relations that do not fit densely.
+
+`dfmf_sparse` is the legacy one, frozen. The notebooks in notebooks/ and
+the results reported in report/ were produced with it, so its numerical
+behaviour is pinned by tests/test_golden.py and does not change. New work
+should use `fit`.
+"""
+
+from .base import DataFusionModel
+from .core import dfmf_sparse, reconstruction_error, fold_in_entities, predict_attribute
+from .model import FusionModel, Relation, fit
+from .init import init_random, init_nndsvd
+from .utils import (
+    ensure_columns, ensure_index, labels_to_relation,
+    merge_relations, normalize_relations,
+)
+
+__all__ = [
+    "fit", "FusionModel", "Relation",
+    "dfmf_sparse", "reconstruction_error", "fold_in_entities", "predict_attribute",
+    "DataFusionModel",
+    "init_random", "init_nndsvd",
+    "ensure_columns", "ensure_index", "labels_to_relation",
+    "merge_relations", "normalize_relations",
+]

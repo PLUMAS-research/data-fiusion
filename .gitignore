@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+
+# Salidas de los ejemplos: se regeneran corriendo los scripts.
+examples/*/output/
+
+# Compilacion de las slides.
+slides/main.typ
+slides/main.pdf
+!slides/img/
+.claude/settings.local.json
