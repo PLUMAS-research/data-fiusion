@@ -70,9 +70,25 @@ def _truncated_svd_left(M, k):
         U_full, sigma_full, _ = np.linalg.svd(dense, full_matrices=False)
         return _svd_flip_u(U_full[:, :k]), sigma_full[:k]
     v0 = np.full(min(m, n), 1.0 / np.sqrt(min(m, n)))
-    U, sigma, _ = spla.svds(M, k=k, v0=v0)
+    U, sigma = _svds_con_reintento(M, k, v0)
     order = np.argsort(-sigma)
     return _svd_flip_u(U[:, order]), sigma[order]
+
+
+def _svds_con_reintento(operador, k, v0):
+    """ARPACK with a retry on its sporadic 'no shifts' failure.
+
+    With the default Krylov basis ARPACK sometimes fails with error 3
+    even on well conditioned inputs; enlarging ncv resolves it. The
+    retry keeps the pinned v0, so the result stays deterministic.
+    """
+    try:
+        U, sigma, _ = spla.svds(operador, k=k, v0=v0)
+    except spla.ArpackError:
+        m, n = operador.shape
+        ncv = min(min(m, n) - 1, max(4 * k + 1, 25))
+        U, sigma, _ = spla.svds(operador, k=k, v0=v0, ncv=ncv)
+    return U, sigma
 
 
 def _nndsvda(U, sigma, fill, eps):
@@ -250,7 +266,7 @@ def _left_factors_streaming(blocks, escalas, k):
         return _left_factors_via_gram(blocks, escalas, k)
     operador = _stacked_operator(blocks, escalas)
     v0 = np.full(min(n, total), 1.0 / np.sqrt(min(n, total)))
-    U, sigma, _ = spla.svds(operador, k=k, v0=v0)
+    U, sigma = _svds_con_reintento(operador, k, v0)
     orden = np.argsort(-sigma)
     return _svd_flip_u(U[:, orden]), sigma[orden]
 
