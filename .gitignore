@@ -9,6 +9,9 @@ dist/
 # Salidas de los ejemplos: se regeneran corriendo los scripts.
 examples/*/output/
 
+# Datos descargados: Last.fm (HetRec 2011) se baja solo la primera vez.
+examples/lastfm/data/
+
 # Compilacion de las slides.
 slides/main.typ
 slides/main.pdf
