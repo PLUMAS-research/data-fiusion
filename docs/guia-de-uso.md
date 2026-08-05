@@ -20,13 +20,13 @@ grupo (co-clustering); el producto $G_i S_{ij} G_j^T$ reconstruye la relación.
 ```python
 import numpy as np
 import scipy.sparse as sp
-from datafiusion import Relation, fit
+from datafiusion import Relation, fuse
 
 relaciones = {
     "viajes": Relation(src="usuario", dst="zona", matrix=matriz_viajes),
     "horarios": Relation(src="usuario", dst="hora", matrix=matriz_horarios),
 }
-modelo = fit(relaciones, ranks={"usuario": 30, "zona": 20, "hora": 10})
+modelo = fuse(relaciones, ranks={"usuario": 30, "zona": 20, "hora": 10})
 
 modelo.stop_reason          # "tol" convergio, "max_iter" se quedo corto
 modelo.rel_error            # error relativo por relacion; cerca de 1 = no aprendio
@@ -70,7 +70,8 @@ para alinear índices. Está en el repo por compatibilidad.
 
 Con conteos sobredispersos (viajes, reproducciones, palabras), la pérdida
 cuadrática sobre los valores crudos es la peor opción medida, porque las entradas
-gigantes dominan el ajuste. La recomendación con evidencia es comprimirlos:
+de mayor magnitud dominan el ajuste. La recomendación con evidencia es
+comprimirlos:
 
 ```python
 Relation(src="usuario", dst="zona", matrix=matriz, preprocess="log1p")
@@ -98,7 +99,7 @@ relaciona con esto"). Cuando eso es falso hay tres mecanismos, por granularidad:
 |---|---|---|
 | `Relation(rows=...)` | fila completa | entidades sin etiqueta en una relación de etiquetas |
 | `Relation(entry_weights=..., background=...)` | entrada | entradas retenidas para validar; ceros como negativos débiles |
-| `fit` avisa y registra `empty_rows` | entidad | entidades que quedaron sin ninguna observación |
+| `fuse` avisa y registra `empty_rows` | entidad | entidades que quedaron sin ninguna observación |
 
 El régimen semi-supervisado es el primero: la relación de etiquetas entra con
 máscara sobre las filas etiquetadas y las demás entidades no aportan su fila, pero
@@ -123,7 +124,7 @@ pesos, (filas, columnas) = holdout_entries(matriz, fraction=0.1, random_state=0)
 rel = Relation(src="usuario", dst="zona", matrix=matriz, entry_weights=pesos)
 
 for rango in (10, 20, 40, 80):
-    modelo = fit({"viajes": rel}, ranks={"usuario": rango, "zona": 20})
+    modelo = fuse({"viajes": rel}, ranks={"usuario": rango, "zona": 20})
     pred = modelo.reconstruct_entries("viajes", filas, columnas)
     verdad = np.asarray(matriz[filas, columnas]).ravel()
     print(rango, float(np.sqrt(np.mean((pred - verdad) ** 2))))
@@ -148,7 +149,7 @@ la aleatoria. Con `init="random"`, `n_runs=k` corre k reinicios y devuelve el de
 menor pérdida final:
 
 ```python
-modelo = fit(relaciones, ranks, init="random", n_runs=5, random_state=0)
+modelo = fuse(relaciones, ranks, init="random", n_runs=5, random_state=0)
 modelo.params["run_losses"], modelo.params["best_run"]
 ```
 
@@ -157,7 +158,7 @@ casi todo lo demás (medido en `examples/movielens/`).
 
 ### Clustering contra predicción
 
-Para **agrupar**, `fit` con el gauge por columnas (default): en MovieLens sube el
+Para **agrupar**, `fuse` con el gauge por columnas (default): en MovieLens sube el
 ARI de 0.464 a 0.741 contra la ruta anterior, y el gauge es lo que hace legible el
 argmax. Para **predecir** un atributo retenido las dos rutas quedan parejas (la
 anterior 0.010 de AP arriba). Los números y protocolos están en
@@ -167,9 +168,9 @@ anterior 0.010 de AP arriba). Los números y protocolos están en
 
 Tres reglas que salieron de errores reales, documentados en los ejemplos:
 
-- **No evaluar in-sample**: predecir una relación que entró al fit da AP cercano a
+- **No evaluar in-sample**: predecir una relación que entró al ajuste da AP cercano a
   1 por construcción. Evaluar con entidades cuya fila de etiquetas estuvo
-  enmascarada, o retenidas del fit.
+  enmascarada, o retenidas del ajuste.
 - **No leer NMI solo**: premia partir grupos. Decidir por ARI (o por la métrica de
   la tarea) y reportar NMI como complemento.
 - **Declarar el criterio antes de correr**: los scripts de `examples/` imprimen su
@@ -224,7 +225,7 @@ ajuste.
 | `rel_error` cercano a 1 en una relación | esa relación no se está aprendiendo: revisar su peso y su escala |
 | `dead_columns` no vacío | componentes colapsadas; suele indicar rango excesivo |
 | `ValueError` con nombres de relación o tipo | los nombres se usan como archivos en `save`; sin `/` ni `\` |
-| `ValueError` por declarar `preprocess` distinto al del fit | el modelo aplica su propia cadena a datos crudos; no pre-transformar |
+| `ValueError` por declarar `preprocess` distinto al del ajuste | el modelo aplica su propia cadena a datos crudos; no pre-transformar |
 
 ## Rendimiento
 

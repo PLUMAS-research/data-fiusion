@@ -140,7 +140,7 @@ de sus relaciones, así que hay que detectar el caso y avisar cuando no se cumpl
 
 ## La diferencia de 1.6% entre las dos rutas
 
-`fit` queda 0.010 de AP por debajo de `dfmf_sparse` en MovieLens, con comparación
+`fuse` queda 0.010 de AP por debajo de `dfmf_sparse` en MovieLens, con comparación
 pareada sobre cuatro semillas. Se descartaron por ablación: el gauge de columnas, el
 paso `eta`, `lambda_S`, el fold-in no negativo, el rango de la grilla de pesos (barrida
 de 0.01 a 1000), el solve final de $S$ y la semántica del peso.
@@ -168,7 +168,7 @@ $4 \times 10^{-5}$, suficiente para que la pérdida salga negativa en régimen c
 y para dejar una tolerancia de $10^{-4}$ en el piso del ruido.
 
 Viable, pero exige acumular la pérdida en `float64` y subir el piso de la tolerancia.
-La conversión debe hacerse aguas arriba: convertir dentro de `fit` duplicaría el nnz en
+La conversión debe hacerse aguas arriba: convertir dentro de `fuse` duplicaría el nnz en
 memoria, que es justamente lo que se quiere evitar.
 
 ## Selección de rango
@@ -198,17 +198,17 @@ declarado antes de cada paso:
    numerador y denominador se acumulan entre las relaciones de cada tipo (el paso
    conjunto desciende la pérdida conjunta), $S$ no negativo, el gauge compensado en
    $S$ y la pérdida como razón de desviación contra el modelo nulo de tasa
-   constante. El experimento contra la vara cuadrática está en
+   constante. El experimento contra la referencia cuadrática está en
    `examples/newsgroups/poisson_vs_cuadratica.py`.
    **Medido, y el criterio no se cumplió**: Poisson sobre conteos crudos da ARI
    0.113 (el nivel de log1p bajo la cuadrática, 0.114); con columnas escaladas por
-   idf sube a 0.151 y empata estadísticamente con la vara (-1.3 SE); sobre TF-IDF
-   normalizado degenera. La likelihood compra lo que la transformación compra, el
-   reponderado por especificidad es la pieza que importa bajo ambas pérdidas, y no
+   idf sube a 0.151 y empata estadísticamente con la referencia (-1.3 SE); sobre TF-IDF
+   normalizado degenera. La likelihood logra lo mismo que la transformación, el
+   reponderado por idf es lo que mejora bajo ambas pérdidas, y no
    hay razón medida para preferir Poisson en agrupamiento de texto. El paso
    siguiente (familias mezcladas) se midió aparte y tampoco superó a la
    cuadrática; ver abajo.
-   **Familias mezcladas: implementado y medido.** Un fit puede combinar relaciones
+   **Familias mezcladas: implementado y medido.** Un ajuste puede combinar relaciones
    Poisson y gaussianas compartiendo factores (la línea de collective matrix
    factorization de Singh y Gordon; verificar la referencia antes de citarla). El
    paso conjunto minimiza la suma de los majorizantes de ambas familias en forma
@@ -217,9 +217,9 @@ declarado antes de cada paso:
    con criterio declarado (ganar por 2 SE en AP de tags retenidos): el brazo
    mezclado (Poisson crudo más etiquetas gaussianas) pierde contra la monofamilia
    con log1p por $-0.050 \pm 0.017$ ($-2.9$ SE), con ambos brazos sobre el
-   baseline de popularidad. La corrida destapó y corrigió un defecto real: sin
+   baseline de popularidad. La corrida encontró un defecto real, corregido: sin
    calibrar el gradiente KL por la desviación nula de su relación, el término de
-   conteos aplasta a cualquier gaussiana y el peso entre familias no tiene efecto.
+   conteos domina numéricamente a cualquier gaussiana y el peso entre familias no tiene efecto.
    Conclusión de la línea de conteos completa: en dos datasets y tres protocolos,
    modelar conteos con su likelihood nunca superó a transformarlos bajo la
    cuadrática. La infraestructura queda (familia por relación, calibración entre
@@ -233,6 +233,19 @@ declarado antes de cada paso:
    de dispersión por relación solo si Poisson falla de forma visible. Con Poisson
    empatando o perdiendo contra la cuadrática transformada en todos los protocolos
    medidos, esta línea queda en baja prioridad.
+
+## Distribuciones por entidad a través de cadenas
+
+Para leer la distribución de un atributo a nivel del grano más fino (por ejemplo,
+el modo de cada viaje cuando la relación etiquetada vive en otro tipo), hace falta
+reconstruir una relación que no existe en el grafo, encadenando backbones a través
+de los tipos compartidos: $G_{viaje} S_{v,a} (G_a^T G_a) S_{a,m} G_m^T$, con todos
+los intermedios de tamaño rango. El wrapper antiguo lo hacía (`relation_profiles`
+en `base.py`, densificado); falta la versión O(n por rango) en la API actual. Es
+la pieza que habilita rebanar una actualización por hora o por segmento al agregar
+distribuciones por entidad fina, en vez de multiplicar el tipo objetivo. El
+protocolo de reconstrucción-como-actualización que la motiva vive en el análisis
+que consume la librería, no en este repo.
 
 ## Criterio de parada por fila en el refinado no negativo
 

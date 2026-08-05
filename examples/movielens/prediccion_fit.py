@@ -30,7 +30,7 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 
-from datafiusion import Relation, fit
+from datafiusion import Relation, fuse
 
 import datos as datos_movielens
 from datos import CLAVE_GENERO
@@ -97,7 +97,7 @@ def ajustar_enmascarado(piezas, filas_etiquetadas, rank, peso, semilla, vistas):
     R = relaciones(piezas, filas_etiquetadas, vistas)
     ranks = {"pelicula": rank, "genero": RANKS_FIJOS["genero"]}
     ranks.update({t: RANKS_FIJOS[t] for t in vistas})
-    return fit(R, ranks, weights={ETIQUETAS: peso}, max_iter=MAX_ITER,
+    return fuse(R, ranks, weights={ETIQUETAS: peso}, max_iter=MAX_ITER,
                tol=1e-6, init="nndsvd", random_state=semilla)
 
 
@@ -109,7 +109,7 @@ def puntajes(modelo, filas):
 
 # %%
 print("=" * 78)
-print("MovieLens: genero con `fit`, mascara por fila contra fold-in")
+print("MovieLens: genero con `fuse`, mascara por fila contra fold-in")
 print("=" * 78)
 
 VISTAS = ("usuario", "actor")
@@ -158,7 +158,7 @@ for semilla in SEMILLAS:
     R_train = relaciones(piezas_train, None, VISTAS)
     ranks = {"pelicula": rank, "genero": RANKS_FIJOS["genero"]}
     ranks.update({t: RANKS_FIJOS[t] for t in VISTAS})
-    modelo_train = fit(R_train, ranks, weights={ETIQUETAS: peso},
+    modelo_train = fuse(R_train, ranks, weights={ETIQUETAS: peso},
                        max_iter=MAX_ITER, tol=1e-6, init="nndsvd", random_state=semilla)
     nuevas = {NOMBRES[t]: Relation(src="pelicula", dst=t,
                                    matrix=piezas[("pelicula", t)][indices["test"]])

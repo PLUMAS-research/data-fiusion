@@ -36,7 +36,7 @@ Opcional: `uv pip install -e ".[viz]"` para el diagrama de relaciones.
 ```python
 import numpy as np
 import scipy.sparse as sp
-from datafiusion import Relation, fit
+from datafiusion import Relation, fuse
 
 rng = np.random.default_rng(0)
 relaciones = {
@@ -45,13 +45,13 @@ relaciones = {
     "generos": Relation(src="pelicula", dst="genero",
                         matrix=sp.random(500, 19, density=0.15, format="csr")),
 }
-modelo = fit(relaciones, ranks={"usuario": 20, "pelicula": 15, "genero": 10},
+modelo = fuse(relaciones, ranks={"usuario": 20, "pelicula": 15, "genero": 10},
              max_iter=200, tol=1e-6)
 
 print(modelo.n_iter, modelo.stop_reason, modelo.rel_error)
 ```
 
-`fit` devuelve un `FusionModel` que lleva consigo los factores, los backbones, el
+`fuse` devuelve un `FusionModel` que lleva consigo los factores, los backbones, el
 escalado aplicado durante el ajuste y la traza de la pérdida. Ese estado es lo que
 permite proyectar entidades nuevas sin que quien llama tenga que recordar en qué
 unidades quedó el ajuste.
@@ -66,7 +66,7 @@ proba = derivado.predict_proba(target="genero", views=["generos"])
 
 `transform` devuelve un modelo derivado que comparte todo salvo el factor proyectado,
 así que compone directamente con `predict_proba`. La solución es no negativa, como los
-factores que produce el ajuste. Honra `Relation.rows` con la misma semántica que `fit`:
+factores que produce el ajuste. Honra `Relation.rows` con la misma semántica que `fuse`:
 cada entidad nueva se resuelve solo desde las relaciones donde fue observada. Las
 entidades nuevas sin ninguna observación quedan con factor cero, generan un aviso y
 aparecen en `empty_rows` del modelo derivado.
@@ -96,7 +96,7 @@ sin reservar entidades completas:
 from datafiusion import holdout_entries
 
 pesos, (filas, columnas) = holdout_entries(M, fraction=0.1, random_state=0)
-modelo = fit({"ratings": Relation(src="usuario", dst="pelicula", matrix=M,
+modelo = fuse({"ratings": Relation(src="usuario", dst="pelicula", matrix=M,
                                   entry_weights=pesos)}, ranks)
 pred = modelo.reconstruct_entries("ratings", filas, columnas)
 ```
@@ -140,7 +140,7 @@ no se normalizan por Frobenius (el balance entre relaciones se controla con
 `weights`). La pérdida reportada es la razón de desviación
 KL(X||R) / KL(X||tasa constante): 0 es ajuste perfecto y 1 es el modelo nulo.
 
-Las familias se pueden mezclar en un fit: una relación de conteos Poisson junto a
+Las familias se pueden mezclar en un ajuste: una relación de conteos Poisson junto a
 relaciones gaussianas (con sus máscaras y pesos por entrada), compartiendo factores.
 El paso conjunto minimiza la suma de los majorizantes de ambas familias en forma
 cerrada, y se reduce a la regla clásica sin Poisson y a la regla KL sin gaussianas.
@@ -160,7 +160,7 @@ La familia existe para cuando el modelo de conteo se necesite por sus propiedade
 
 ### Entidades que se quedan sin datos
 
-`fit` avisa cuando una entidad no tiene ninguna observación en ninguna relación, y las
+`fuse` avisa cuando una entidad no tiene ninguna observación en ninguna relación, y las
 deja registradas en `modelo.empty_rows`. Sin ese aviso el problema es invisible: el
 factor de esas entidades queda donde lo dejó la inicialización, despreciable frente a
 cualquier fila ajustada, y con `nndsvd` idéntico para todas, así que `argmax` las manda
@@ -169,7 +169,7 @@ a todas al mismo grupo e infla ese grupo sin ninguna señal.
 Pasa en la práctica cada vez que un filtro aguas arriba deja entidades sin filas.
 
 ```python
-modelo = fit(relaciones, ranks)      # UserWarning si las hay
+modelo = fuse(relaciones, ranks)      # UserWarning si las hay
 modelo.empty_rows                    # {"usuario": array([12, 87, ...])}
 ```
 
@@ -188,7 +188,7 @@ $(G_i \circ L_i)\, S_{ij}\, G_j^T$, siguiendo TS-NMF (MacMillan y Wilson, 2017).
 permitido = np.ones((n_peliculas, 19), dtype=bool)
 permitido[etiquetadas] = Y[etiquetadas] > 0      # solo sus generos
 
-modelo = fit(relaciones, ranks={"pelicula": 19, ...},
+modelo = fuse(relaciones, ranks={"pelicula": 19, ...},
              supervision={"pelicula": permitido})
 ```
 
@@ -264,20 +264,21 @@ inicialización aleatoria y cuatro semillas, contra los géneros como referencia
 |---|---|---|
 | k-means sobre las mismas matrices | 0.083 | 0.015 |
 | `dfmf_sparse` | 0.579 | 0.464 |
-| `fit` sin gauge | 0.620 | 0.509 |
-| `fit` con gauge por columnas | **0.756** | **0.741** |
+| `fuse` sin gauge | 0.620 | 0.509 |
+| `fuse` con gauge por columnas | **0.756** | **0.741** |
 
 Con `nndsvd`, que ya parte de un punto bien escalado, la diferencia se reduce a 0.764
 contra 0.745. El gauge sirve sobre todo para que el resultado no dependa de eso.
 
 ## Dos rutas de ajuste
 
-`fit` es la API actual. `dfmf_sparse` es la anterior, congelada: su comportamiento
+`fuse` es la API actual (`fit` se mantiene como alias). `dfmf_sparse` es la
+anterior, congelada: su comportamiento
 numérico está fijado por `tests/test_golden.py` y no cambia.
 
-Cuál conviene depende de para qué. Para **agrupar**, `fit` con el gauge por columnas, por
+Cuál conviene depende de para qué. Para **agrupar**, `fuse` con el gauge por columnas, por
 un margen amplio. Para **predecir** un atributo retenido, las dos quedan parejas y la
-anterior sale 0.010 de AP arriba en MovieLens. `fit` agrega además máscaras de
+anterior sale 0.010 de AP arriba en MovieLens. `fuse` agrega además máscaras de
 observación, parada por tolerancia, y reanudación de ajustes largos.
 
 ## Guía de uso
@@ -291,9 +292,9 @@ medida, y sus fragmentos de código corren tal como aparecen.
 
 | Función | Módulo | Qué hace |
 |---|---|---|
-| `fit(relations, ranks, ...)` | `model` | Ajusta y devuelve un `FusionModel`. |
-| `fit(..., supervision={tipo: L})` | `model` | Ancla componentes a etiquetas conocidas (TS-NMF). |
-| `fit(..., n_runs=k)` | `model` | Reinicios aleatorios; devuelve la corrida de menor pérdida. |
+| `fuse(relations, ranks, ...)` | `model` | Ajusta y devuelve un `FusionModel`. |
+| `fuse(..., supervision={tipo: L})` | `model` | Ancla componentes a etiquetas conocidas (TS-NMF). |
+| `fuse(..., n_runs=k)` | `model` | Reinicios aleatorios; devuelve la corrida de menor pérdida. |
 | `Relation(..., family="poisson")` | `model` | Relación de conteos por KL generalizada. |
 | `Relation(..., preprocess="log1p")` | `model` | Transformación de valores que viaja con el modelo. |
 | `FusionModel.transform(relations, target)` | `model` | Proyecta entidades nuevas, sin refit. |
@@ -302,6 +303,7 @@ medida, y sus fragmentos de código corren tal como aparecen.
 | `FusionModel.reconstruct_entries(name, rows, cols)` | `model` | Reconstrucción en coordenadas, unidades originales. |
 | `FusionModel.save/load/resume` | `model` | Persistencia y reanudación de un ajuste. |
 | `holdout_entries(matrix, fraction)` | `utils` | Retiene entradas para validación. |
+| `fusion_diagram(relations_or_model)` | `diagram` | Esquema de la fusión, orientado a publicación. |
 | `sddmm(pattern, A, B)` | `ops` | Producto de rango bajo muestreado en un patrón disperso. |
 | `dfmf_sparse(R, ranks, ...)` | `core` | Ruta anterior, congelada. |
 | `reconstruction_error(R, G, S)` | `core` | Suma de errores Frobenius relativos. |

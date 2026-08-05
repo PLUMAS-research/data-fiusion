@@ -39,7 +39,7 @@ import pandas as pd
 import scipy.sparse as sp
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 
-from datafiusion import Relation, fit
+from datafiusion import Relation, fuse
 
 import datos as datos_movielens
 from datos import CLAVE_GENERO
@@ -103,7 +103,7 @@ def medir(rango, peso, semilla):
     ranks = {"pelicula": rango, "genero": min(RANKS_FIJOS["genero"], rango)}
     ranks.update({t: RANKS_FIJOS[t] for t in VISTAS})
 
-    modelo = fit(R, ranks, weights={ETIQUETAS: peso}, max_iter=MAX_ITER,
+    modelo = fuse(R, ranks, weights={ETIQUETAS: peso}, max_iter=MAX_ITER,
                  tol=1e-7, init="random", random_state=semilla)
 
     scores = modelo.predict_proba(target="genero", views=[ETIQUETAS],

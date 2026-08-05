@@ -27,7 +27,7 @@ from sklearn.datasets import fetch_20newsgroups
 from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 
-from datafiusion import Relation, fit
+from datafiusion import Relation, fuse
 
 
 DIR_SALIDA = Path(os.environ.get("DIR_SALIDA", Path(__file__).parent / "output"))
@@ -88,7 +88,7 @@ for como in TRANSFORMACIONES:
     V = transformar(conteos, como)
     for semilla in SEMILLAS:
         R = {"docs": Relation(src="documento", dst="termino", matrix=V)}
-        modelo = fit(R, {"documento": n_categorias, "termino": RANK_TERMINO},
+        modelo = fuse(R, {"documento": n_categorias, "termino": RANK_TERMINO},
                      max_iter=MAX_ITER, tol=1e-7, init="random",
                      random_state=semilla)
         grupos = modelo.factor("documento").argmax(axis=1)

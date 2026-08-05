@@ -1,9 +1,9 @@
 """Familia Poisson contra la referencia cuadratica sobre TF-IDF.
 
-`conteos.py` establecio la vara: la tri-factorizacion cuadratica sobre
+`conteos.py` establecio la referencia: la tri-factorizacion cuadratica sobre
 TF-IDF llega a ARI 0.185, y ninguna transformacion estabilizadora de
 varianza pasa de 0.114. Este script mide si la likelihood de conteo
-(KL generalizada, familia Poisson) supera esa vara.
+(KL generalizada, familia Poisson) supera esa referencia.
 
 Criterio de exito, declarado antes de correr: ganarle al ARI 0.185 de la
 cuadratica sobre TF-IDF por 2 errores estandar. Si Poisson sobre conteos
@@ -32,7 +32,7 @@ from sklearn.datasets import fetch_20newsgroups
 from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 
-from datafiusion import Relation, fit
+from datafiusion import Relation, fuse
 
 
 DIR_SALIDA = Path(os.environ.get("DIR_SALIDA", Path(__file__).parent / "output"))
@@ -75,7 +75,7 @@ for nombre_variante, V in VARIANTES.items():
     for semilla in SEMILLAS:
         R = {"docs": Relation(src="documento", dst="termino", matrix=V,
                               family="poisson")}
-        modelo = fit(R, {"documento": n_categorias, "termino": RANK_TERMINO},
+        modelo = fuse(R, {"documento": n_categorias, "termino": RANK_TERMINO},
                      max_iter=MAX_ITER, tol=1e-6, init="random",
                      random_state=semilla)
         grupos = modelo.factor("documento").argmax(axis=1)

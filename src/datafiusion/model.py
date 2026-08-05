@@ -1,6 +1,6 @@
 """Fitting API for sparse data fusion, built for relations that do not fit densely.
 
-The entry point is `fit`, which takes named relations and returns a
+The entry point is `fuse`, which takes named relations and returns a
 `FusionModel` carrying everything needed downstream: factors, backbones,
 the scaling applied at fit time, the loss trace and the hyperparameters.
 Carrying the scaling is what makes `model.transform(...)` correct by
@@ -370,7 +370,7 @@ class FusionModel:
         learned backbones, which silently produces the wrong factors
         (cosine 0.44 against the correct fold-in, measured).
 
-        Relation.rows is honoured, with the same semantics as in `fit`:
+        Relation.rows is honoured, with the same semantics as in `fuse`:
         it marks the observed rows of the MATRIX. When the source is
         `target` it says which new entities carry an observation in that
         relation, and each entity is solved from the relations it is
@@ -768,14 +768,14 @@ class FusionModel:
         for clave in ("n_runs", "run_losses", "best_run", "family",
                       "preprocess", "idf"):
             params.pop(clave, None)
-        return fit(relations, ranks=self.ranks, _warm_start=self, **params)
+        return fuse(relations, ranks=self.ranks, _warm_start=self, **params)
 
 
 # --------------------------------------------------------------------------
 # ajuste
 
 
-def fit(relations, ranks, weights=None, normalize="frobenius", masks=None,
+def fuse(relations, ranks, weights=None, normalize="frobenius", masks=None,
         supervision=None,
         eta=1.0, gauge="column", lambda_S=1e-2, lambda_G=0.0,
         alpha_graph=0.0, graphs=None, theta=None,
@@ -888,7 +888,7 @@ def fit(relations, ranks, weights=None, normalize="frobenius", masks=None,
         # a la vez multiplicaria por k la memoria de los factores.
         modelo, mejor, perdidas = None, 0, []
         for i in range(n_runs):
-            corrida = fit(relations, ranks, random_state=semillas[i], **comunes)
+            corrida = fuse(relations, ranks, random_state=semillas[i], **comunes)
             perdidas.append(float(corrida.history[-1]))
             if modelo is None or perdidas[i] < perdidas[mejor]:
                 modelo, mejor = corrida, i
@@ -1108,6 +1108,10 @@ def fit(relations, ranks, weights=None, normalize="frobenius", masks=None,
         n_iter=iteraciones_previas + iteracion, converged=convergio,
         stop_reason=razon, dead_columns=muertas, empty_rows=vacias, params=params,
     )
+
+
+# El nombre historico se mantiene como alias.
+fit = fuse
 
 
 # --------------------------------------------------------------------------

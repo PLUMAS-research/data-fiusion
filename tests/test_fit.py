@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 
-from datafiusion import Relation, dfmf_sparse, fit
+from datafiusion import Relation, dfmf_sparse, fuse
 from datafiusion.model import _graph_laplacian
 
 
@@ -35,20 +35,20 @@ def instancia(semilla=0, n=(80, 60, 30)):
 
 
 def test_baja_la_perdida():
-    modelo = fit(instancia(), RANKS, max_iter=60, tol=None, random_state=0)
+    modelo = fuse(instancia(), RANKS, max_iter=60, tol=None, random_state=0)
     assert modelo.history[-1] < modelo.history[0]
     assert (modelo.history >= 0).all()
 
 
 def test_factores_no_negativos():
-    modelo = fit(instancia(), RANKS, max_iter=40, random_state=0)
+    modelo = fuse(instancia(), RANKS, max_iter=40, random_state=0)
     for tipo, factor in modelo.G.items():
         assert (factor >= 0).all(), f"G[{tipo}] tiene entradas negativas"
 
 
 def test_gauge_fija_la_norma():
     """The column gauge must leave ||G_t||_F^2 exactly equal to c_t."""
-    modelo = fit(instancia(), RANKS, max_iter=30, gauge="column", random_state=0)
+    modelo = fuse(instancia(), RANKS, max_iter=30, gauge="column", random_state=0)
     for tipo, factor in modelo.G.items():
         assert abs(np.square(factor).sum() - RANKS[tipo]) < 1e-9
 
@@ -66,8 +66,8 @@ def test_calibracion_invariante_a_la_escala_de_los_datos():
     grafo = {"t1": _grafo_anillo(80)}
     comun = dict(ranks=RANKS, max_iter=25, tol=None, random_state=0,
                  alpha_graph=0.5, graphs=grafo)
-    m1 = fit(base, **comun)
-    m2 = fit(escalada, **comun)
+    m1 = fuse(base, **comun)
+    m2 = fuse(escalada, **comun)
     for tipo in m1.G:
         desvio = np.abs(m1.G[tipo] - m2.G[tipo]).max() / max(np.abs(m1.G[tipo]).max(), 1e-30)
         assert desvio < 1e-9, f"{tipo}: desvio {desvio:.3e}"
@@ -81,8 +81,8 @@ def test_mascara_completa_equivale_a_no_tener_mascara():
                     rows=np.arange(r.shape[0]))
         for n, r in base.items()
     }
-    m1 = fit(base, RANKS, max_iter=30, tol=None, random_state=0)
-    m2 = fit(con_mascara, RANKS, max_iter=30, tol=None, random_state=0)
+    m1 = fuse(base, RANKS, max_iter=30, tol=None, random_state=0)
+    m2 = fuse(con_mascara, RANKS, max_iter=30, tol=None, random_state=0)
     for tipo in m1.G:
         assert np.abs(m1.G[tipo] - m2.G[tipo]).max() < 1e-12
 
@@ -107,7 +107,7 @@ def test_mascara_parcial_ignora_el_contenido_oculto():
         enmascarada = dict(base)
         enmascarada["r01"] = Relation(src=relacion.src, dst=relacion.dst,
                                       matrix=sp.csr_matrix(denso), rows=observadas)
-        return fit(enmascarada, RANKS, max_iter=25, tol=None, random_state=0)
+        return fuse(enmascarada, RANKS, max_iter=25, tol=None, random_state=0)
 
     m1, m2 = con_basura(11), con_basura(22)
     for tipo in m1.G:
@@ -118,13 +118,13 @@ def test_mascara_parcial_ignora_el_contenido_oculto():
 def test_pesos_cambian_el_ajuste():
     """A relation weighted 30x must end up better reconstructed than at 0.03x."""
     base = instancia()
-    alto = fit(base, RANKS, weights={"r01": 30.0}, max_iter=40, tol=None, random_state=0)
-    bajo = fit(base, RANKS, weights={"r01": 0.03}, max_iter=40, tol=None, random_state=0)
+    alto = fuse(base, RANKS, weights={"r01": 30.0}, max_iter=40, tol=None, random_state=0)
+    bajo = fuse(base, RANKS, weights={"r01": 0.03}, max_iter=40, tol=None, random_state=0)
     assert alto.rel_error["r01"] < bajo.rel_error["r01"]
 
 
 def test_tol_detiene_y_lo_reporta():
-    modelo = fit(instancia(), RANKS, max_iter=500, tol=1e-4, random_state=0)
+    modelo = fuse(instancia(), RANKS, max_iter=500, tol=1e-4, random_state=0)
     assert modelo.converged
     assert modelo.stop_reason == "tol"
     assert modelo.n_iter < 500
@@ -137,7 +137,7 @@ def test_callback_puede_detener():
         visto.append((iteracion, perdida))
         return iteracion >= 7
 
-    modelo = fit(instancia(), RANKS, max_iter=100, tol=None, callback=parar, random_state=0)
+    modelo = fuse(instancia(), RANKS, max_iter=100, tol=None, callback=parar, random_state=0)
     assert modelo.stop_reason == "callback"
     assert modelo.n_iter == 7
     assert len(visto) == 7
@@ -148,7 +148,7 @@ def test_callback_puede_detener():
 
 def test_transform_devuelve_factores_no_negativos():
     base = instancia()
-    modelo = fit(base, RANKS, max_iter=40, random_state=0)
+    modelo = fuse(base, RANKS, max_iter=40, random_state=0)
     nuevas = _relaciones_nuevas(base, n_new=25, semilla=3)
     derivado = modelo.transform(nuevas, target="t1")
     assert (derivado.G["t1"] >= 0).all()
@@ -160,7 +160,7 @@ def test_transform_cerca_del_optimo_nnls():
     from scipy.optimize import nnls
 
     base = instancia()
-    modelo = fit(base, RANKS, max_iter=40, random_state=0)
+    modelo = fuse(base, RANKS, max_iter=40, random_state=0)
     nuevas = _relaciones_nuevas(base, n_new=40, semilla=5)
     G_new = modelo.transform(nuevas, target="t1", max_iter=500, tol=1e-10).G["t1"]
 
@@ -198,7 +198,7 @@ def test_transform_rechaza_columnas_permutadas():
                     col_labels=etiquetas if r.dst == "t2" else None)
         for n, r in base.items()
     }
-    modelo = fit(con_etiquetas, RANKS, max_iter=20, random_state=0)
+    modelo = fuse(con_etiquetas, RANKS, max_iter=20, random_state=0)
 
     nuevas = _relaciones_nuevas(base, n_new=15, semilla=8)
     permutadas = {}
@@ -216,7 +216,7 @@ def test_transform_rechaza_columnas_permutadas():
 
 def test_transform_rechaza_forma_incompatible():
     base = instancia()
-    modelo = fit(base, RANKS, max_iter=20, random_state=0)
+    modelo = fuse(base, RANKS, max_iter=20, random_state=0)
     nuevas = _relaciones_nuevas(base, n_new=10, semilla=2)
     rota = dict(nuevas)
     nombre = next(iter(nuevas))
@@ -234,7 +234,7 @@ def test_transform_con_mascara_excluye_y_reporta():
     sin mascara: el solve por patrones no puede mover el resultado.
     """
     base = instancia()
-    modelo = fit(base, RANKS, max_iter=30, random_state=0)
+    modelo = fuse(base, RANKS, max_iter=30, random_state=0)
     nuevas = _relaciones_nuevas(base, n_new=10, semilla=6)
     observadas = np.setdiff1d(np.arange(10), [3])
     con_mascara = {"r01": Relation(src="t1", dst="t2",
@@ -259,7 +259,7 @@ def test_transform_mascara_en_una_relacion_usa_la_otra():
     parada global.
     """
     base = instancia()
-    modelo = fit(base, RANKS, max_iter=30, random_state=0)
+    modelo = fuse(base, RANKS, max_iter=30, random_state=0)
     nuevas = _relaciones_nuevas(base, n_new=12, semilla=7)
     excluidas = np.array([2, 5])
     observadas = np.setdiff1d(np.arange(12), excluidas)
@@ -286,7 +286,7 @@ def test_transform_propaga_empty_rows_del_padre():
             M[:, vacias_t2] = 0.0
         ajustadas[nombre] = Relation(src=r.src, dst=r.dst, matrix=sp.csr_matrix(M))
     with pytest.warns(UserWarning, match="no observation"):
-        modelo = fit(ajustadas, RANKS, max_iter=20, tol=None, random_state=0)
+        modelo = fuse(ajustadas, RANKS, max_iter=20, tol=None, random_state=0)
     derivado = modelo.transform(_relaciones_nuevas(base, n_new=8, semilla=9),
                                 target="t1")
     assert np.array_equal(derivado.empty_rows["t2"], np.array(vacias_t2))
@@ -295,7 +295,7 @@ def test_transform_propaga_empty_rows_del_padre():
 
 def test_transform_compone_con_predict_proba():
     base = instancia()
-    modelo = fit(base, RANKS, max_iter=30, random_state=0)
+    modelo = fuse(base, RANKS, max_iter=30, random_state=0)
     nuevas = _relaciones_nuevas(base, n_new=12, semilla=4)
     proba = modelo.transform(nuevas, target="t1").predict_proba(
         target="t3", views=["r02"], known={"t1": np.arange(12)})
@@ -308,7 +308,7 @@ def test_transform_compone_con_predict_proba():
 
 def test_predict_proba_top_k():
     base = instancia()
-    modelo = fit(base, RANKS, max_iter=20, random_state=0)
+    modelo = fuse(base, RANKS, max_iter=20, random_state=0)
     completo = modelo.predict_proba("t3", views=["r02"], known={"t1": np.arange(80)})
     indices, puntajes = modelo.predict_proba(
         "t3", views=["r02"], known={"t1": np.arange(80)}, top_k=3)
@@ -319,7 +319,7 @@ def test_predict_proba_top_k():
 
 def test_predict_proba_rechaza_salida_gigante():
     base = instancia()
-    modelo = fit(base, RANKS, max_iter=10, random_state=0)
+    modelo = fuse(base, RANKS, max_iter=10, random_state=0)
     with pytest.raises(ValueError, match="top_k"):
         modelo.predict_proba("t3", views=["r02"], known={"t1": np.arange(80)},
                              max_bytes=100)
@@ -327,7 +327,7 @@ def test_predict_proba_rechaza_salida_gigante():
 
 def test_lotes_no_cambian_el_resultado():
     base = instancia()
-    modelo = fit(base, RANKS, max_iter=20, random_state=0)
+    modelo = fuse(base, RANKS, max_iter=20, random_state=0)
     entero = modelo.predict_proba("t3", views=["r02", "r12"],
                                   known={"t1": np.arange(80), "t2": np.arange(80) % 60})
     por_lotes = modelo.predict_proba("t3", views=["r02", "r12"],
@@ -374,7 +374,7 @@ def test_grafo_no_encoge_los_extremos():
         "r01": Relation(src="a", dst="b",
                         matrix=sp.csr_matrix(np.abs(np.random.default_rng(0).standard_normal((n, 20)))))
     }
-    modelo = fit(relaciones, {"a": 4, "b": 3}, graphs={"a": _grafo_cadena(n)},
+    modelo = fuse(relaciones, {"a": 4, "b": 3}, graphs={"a": _grafo_cadena(n)},
                  alpha_graph=2.0, max_iter=200, tol=None, random_state=0)
     normas = np.linalg.norm(modelo.G["a"], axis=1)
     extremos = normas[[0, -1]].mean()
@@ -384,19 +384,19 @@ def test_grafo_no_encoge_los_extremos():
 
 def test_grafo_sin_alpha_levanta_error():
     with pytest.raises(ValueError, match="alpha_graph"):
-        fit(instancia(), RANKS, graphs={"t1": _grafo_anillo(80)}, alpha_graph=0.0)
+        fuse(instancia(), RANKS, graphs={"t1": _grafo_anillo(80)}, alpha_graph=0.0)
 
 
 def test_alpha_sin_grafo_levanta_error():
     with pytest.raises(ValueError, match="no graphs"):
-        fit(instancia(), RANKS, alpha_graph=1.0)
+        fuse(instancia(), RANKS, alpha_graph=1.0)
 
 
 # --------------------------------------------------------------- persistencia
 
 
 def test_save_load_ida_y_vuelta(tmp_path):
-    modelo = fit(instancia(), RANKS, max_iter=25, random_state=0)
+    modelo = fuse(instancia(), RANKS, max_iter=25, random_state=0)
     modelo.save(tmp_path / "modelo")
     from datafiusion import FusionModel
     leido = FusionModel.load(tmp_path / "modelo")
@@ -411,7 +411,7 @@ def test_save_load_ida_y_vuelta(tmp_path):
 
 def test_load_con_mmap(tmp_path):
     """Factors must stay on disk, which .npz cannot do."""
-    modelo = fit(instancia(), RANKS, max_iter=10, random_state=0)
+    modelo = fuse(instancia(), RANKS, max_iter=10, random_state=0)
     modelo.save(tmp_path / "modelo")
     from datafiusion import FusionModel
     leido = FusionModel.load(tmp_path / "modelo", mmap=True)
@@ -420,8 +420,8 @@ def test_load_con_mmap(tmp_path):
 
 def test_resume_equivale_a_correr_de_corrido():
     base = instancia()
-    entero = fit(base, RANKS, max_iter=40, tol=None, random_state=0)
-    parcial = fit(base, RANKS, max_iter=20, tol=None, random_state=0)
+    entero = fuse(base, RANKS, max_iter=40, tol=None, random_state=0)
+    parcial = fuse(base, RANKS, max_iter=20, tol=None, random_state=0)
     reanudado = parcial.resume(base, max_iter=20)
     for tipo in entero.G:
         desvio = np.abs(entero.G[tipo] - reanudado.G[tipo]).max()
@@ -435,7 +435,7 @@ def test_resume_equivale_a_correr_de_corrido():
 
 def test_acepta_el_dict_legacy():
     R = {("t1", "t2"): [sp.random(30, 20, density=0.3, format="csr", random_state=0)]}
-    modelo = fit(R, {"t1": 4, "t2": 3}, max_iter=10, random_state=0)
+    modelo = fuse(R, {"t1": 4, "t2": 3}, max_iter=10, random_state=0)
     assert "t1~t2" in modelo.S
 
 
@@ -447,14 +447,14 @@ def test_rechaza_auto_relacion():
 def test_rechaza_rank_mayor_que_entidades():
     R = {("t1", "t2"): [sp.random(10, 20, density=0.3, format="csr", random_state=0)]}
     with pytest.raises(ValueError, match="exceeds"):
-        fit(R, {"t1": 40, "t2": 3}, max_iter=5)
+        fuse(R, {"t1": 40, "t2": 3}, max_iter=5)
 
 
 def test_rechaza_nombres_de_relacion_invalidos():
     M = sp.random(30, 20, density=0.3, format="csr", random_state=0)
     for nombre in ("a/b", "", ".."):
         with pytest.raises(ValueError, match="save"):
-            fit({nombre: Relation(src="t1", dst="t2", matrix=M)},
+            fuse({nombre: Relation(src="t1", dst="t2", matrix=M)},
                 {"t1": 4, "t2": 3}, max_iter=2)
 
 
@@ -466,7 +466,7 @@ def test_rechaza_nombre_de_tipo_invalido():
 
 def test_desempaqueta_como_la_ruta_vieja():
     """`G, S = model` must keep working for code written against dfmf_sparse."""
-    modelo = fit(instancia(), RANKS, max_iter=10, random_state=0)
+    modelo = fuse(instancia(), RANKS, max_iter=10, random_state=0)
     G, S = modelo
     assert set(G) == {"t1", "t2", "t3"}
     assert set(S) == {"r01", "r02", "r12"}
@@ -497,7 +497,7 @@ def test_supervision_fija_las_componentes_prohibidas_en_cero():
     permitido[:40, :2] = True        # la primera mitad solo usa 2 componentes
     permitido[40:, 2:] = True        # la segunda mitad, las otras 3
 
-    modelo = fit(base, RANKS, supervision={"t1": permitido}, max_iter=50,
+    modelo = fuse(base, RANKS, supervision={"t1": permitido}, max_iter=50,
                  tol=None, random_state=0)
     G = modelo.G["t1"]
     assert (G[~permitido] == 0).all(), "hay carga en componentes prohibidas"
@@ -508,7 +508,7 @@ def test_supervision_no_impide_que_baje_la_perdida():
     base = instancia()
     permitido = np.ones((80, RANKS["t1"]), dtype=bool)
     permitido[:40, 0] = False
-    modelo = fit(base, RANKS, supervision={"t1": permitido}, max_iter=60,
+    modelo = fuse(base, RANKS, supervision={"t1": permitido}, max_iter=60,
                  tol=None, random_state=0)
     assert modelo.history[-1] < modelo.history[0]
 
@@ -516,8 +516,8 @@ def test_supervision_no_impide_que_baje_la_perdida():
 def test_supervision_todo_permitido_equivale_a_no_pasarla():
     base = instancia()
     todo = np.ones((80, RANKS["t1"]), dtype=bool)
-    m1 = fit(base, RANKS, max_iter=30, tol=None, random_state=0)
-    m2 = fit(base, RANKS, supervision={"t1": todo}, max_iter=30, tol=None,
+    m1 = fuse(base, RANKS, max_iter=30, tol=None, random_state=0)
+    m2 = fuse(base, RANKS, supervision={"t1": todo}, max_iter=30, tol=None,
              random_state=0)
     for tipo in m1.G:
         assert np.abs(m1.G[tipo] - m2.G[tipo]).max() < 1e-12
@@ -526,7 +526,7 @@ def test_supervision_todo_permitido_equivale_a_no_pasarla():
 def test_supervision_rechaza_forma_incorrecta():
     base = instancia()
     with pytest.raises(ValueError, match="expected"):
-        fit(base, RANKS, supervision={"t1": np.ones((80, 99), dtype=bool)}, max_iter=5)
+        fuse(base, RANKS, supervision={"t1": np.ones((80, 99), dtype=bool)}, max_iter=5)
 
 
 def test_supervision_rechaza_entidad_sin_componentes():
@@ -534,7 +534,7 @@ def test_supervision_rechaza_entidad_sin_componentes():
     permitido = np.ones((80, RANKS["t1"]), dtype=bool)
     permitido[7] = False
     with pytest.raises(ValueError, match="no allowed component"):
-        fit(base, RANKS, supervision={"t1": permitido}, max_iter=5)
+        fuse(base, RANKS, supervision={"t1": permitido}, max_iter=5)
 
 
 # --------------------------------------------- entidades sin observaciones
@@ -559,7 +559,7 @@ def test_detecta_entidades_sin_datos():
     """Una entidad sin ninguna observacion tiene que quedar registrada."""
     vacias = [10, 11, 37]
     with pytest.warns(UserWarning, match="no observation"):
-        modelo = fit(_con_filas_vacias(vacias), RANKS, max_iter=30, tol=None,
+        modelo = fuse(_con_filas_vacias(vacias), RANKS, max_iter=30, tol=None,
                      random_state=0)
     assert np.array_equal(modelo.empty_rows["t1"], np.array(vacias))
 
@@ -568,7 +568,7 @@ def test_sin_entidades_vacias_no_avisa():
     import warnings as w
     with w.catch_warnings():
         w.simplefilter("error")
-        modelo = fit(instancia(), RANKS, max_iter=20, tol=None, random_state=0)
+        modelo = fuse(instancia(), RANKS, max_iter=20, tol=None, random_state=0)
     assert modelo.empty_rows == {}
 
 
@@ -582,7 +582,7 @@ def test_el_factor_de_una_entidad_sin_datos_no_dice_nada(init):
     """
     vacias = [10, 11]
     with pytest.warns(UserWarning):
-        modelo = fit(_con_filas_vacias(vacias), RANKS, max_iter=50, tol=None,
+        modelo = fuse(_con_filas_vacias(vacias), RANKS, max_iter=50, tol=None,
                      init=init, random_state=0)
     G = modelo.G["t1"]
     normas = np.linalg.norm(G, axis=1)
@@ -604,7 +604,7 @@ def test_una_fila_enmascarada_no_cuenta_como_observacion():
         rows = observadas if r.src == "t1" else None
         enmascarada[nombre] = Relation(src=r.src, dst=r.dst, matrix=r.matrix, rows=rows)
     with pytest.warns(UserWarning, match="no observation"):
-        modelo = fit(enmascarada, RANKS, max_iter=20, tol=None, random_state=0)
+        modelo = fuse(enmascarada, RANKS, max_iter=20, tol=None, random_state=0)
     assert set(modelo.empty_rows["t1"]) == set(range(40, 80))
 
 
@@ -618,7 +618,7 @@ def test_mascara_de_filas_y_supervision_conviven():
     permitido = np.ones((80, RANKS["t1"]), dtype=bool)
     permitido[etiquetadas, 2:] = False       # las etiquetadas usan 2 componentes
 
-    modelo = fit(relaciones, RANKS, supervision={"t1": permitido},
+    modelo = fuse(relaciones, RANKS, supervision={"t1": permitido},
                  max_iter=40, tol=None, random_state=0)
     G = modelo.G["t1"]
     assert (G[etiquetadas, 2:] == 0).all(), "la supervision no se respeto"
@@ -636,10 +636,10 @@ def test_n_runs_elige_la_mejor_corrida():
     que las corridas se pueden reproducir una a una.
     """
     base = instancia()
-    modelo = fit(base, RANKS, n_runs=3, init="random", random_state=0,
+    modelo = fuse(base, RANKS, n_runs=3, init="random", random_state=0,
                  max_iter=15, tol=None)
     semillas = np.random.SeedSequence(0).spawn(3)
-    perdidas = [fit(base, RANKS, init="random", random_state=s,
+    perdidas = [fuse(base, RANKS, init="random", random_state=s,
                     max_iter=15, tol=None).history[-1] for s in semillas]
     assert modelo.history[-1] == min(perdidas)
     assert modelo.params["n_runs"] == 3
@@ -650,18 +650,18 @@ def test_n_runs_elige_la_mejor_corrida():
 
 def test_n_runs_exige_init_random():
     with pytest.raises(ValueError, match="init='random'"):
-        fit(instancia(), RANKS, n_runs=2, init="nndsvd", max_iter=2)
+        fuse(instancia(), RANKS, n_runs=2, init="nndsvd", max_iter=2)
 
 
 def test_n_runs_rechaza_generator():
     with pytest.raises(ValueError, match="Generator"):
-        fit(instancia(), RANKS, n_runs=2, init="random",
+        fuse(instancia(), RANKS, n_runs=2, init="random",
             random_state=np.random.default_rng(0), max_iter=2)
 
 
 def test_resume_de_un_multistart_corre():
     base = instancia()
-    modelo = fit(base, RANKS, n_runs=2, init="random", random_state=1,
+    modelo = fuse(base, RANKS, n_runs=2, init="random", random_state=1,
                  max_iter=10, tol=None)
     reanudado = modelo.resume(base, max_iter=5)
     assert reanudado.n_iter == modelo.n_iter + 5
@@ -685,7 +685,7 @@ def test_mascara_flotante_no_vacia_se_rechaza():
 def test_mascara_entera_vacia_equivale_a_booleana_toda_falsa():
     """rows=[] used to crash in transform: np.asarray([]) is float64."""
     base = instancia()
-    modelo = fit(base, RANKS, max_iter=20, tol=None, random_state=0)
+    modelo = fuse(base, RANKS, max_iter=20, tol=None, random_state=0)
     M_nueva = base["r01"].matrix[:10]
     d = {}
     for clave, mascara in [("lista", []), ("bool", np.zeros(10, dtype=bool))]:
@@ -702,7 +702,7 @@ def test_resume_de_un_transformado_se_rechaza():
     """The derived factor belongs to folded-in entities; resuming from it
     would warm-start the fit with factors of different entities."""
     base = instancia()
-    modelo = fit(base, RANKS, max_iter=15, tol=None, random_state=0)
+    modelo = fuse(base, RANKS, max_iter=15, tol=None, random_state=0)
     nuevas = {"r01": Relation(src="t1", dst="t2", matrix=base["r01"].matrix[:10])}
     derivado = modelo.transform(nuevas, target="t1")
     with pytest.raises(ValueError, match="transform"):

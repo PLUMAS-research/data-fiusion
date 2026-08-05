@@ -43,7 +43,7 @@ entre los k primeros, con k = géneros verdaderos) y AP media.
 | `curvas.py` | Barre rango y peso, y genera las figuras de cómo elegirlos. | ~10 min |
 | `supervision.py` | Anclar componentes a los géneros conocidos, al estilo TS-NMF. | ~10 min |
 | `prediccion.py` | Baselines, barrido en validación y evaluación en test, por la ruta anterior. | ~3 min |
-| `prediccion_fit.py` | La misma tarea con `fit`, comparando máscaras contra fold-in. | ~20 min |
+| `prediccion_fit.py` | La misma tarea con `fuse`, comparando máscaras contra fold-in. | ~20 min |
 | `comparacion.py` | Las dos rutas cara a cara, misma grilla y mismas semillas, con test pareado. | ~30 min |
 | `equivalencia.py` | Costo del init, y `dfmf_sparse` contra scikit-fusion con el mismo evaluador. | ~5 min |
 | `escala.py` | Tiempo y memoria contra scikit-fusion, variando filas y columnas. | ~5 min |
@@ -76,8 +76,8 @@ Las dos rutas de ajuste, comparación pareada sobre cuatro semillas:
 | protocolo | AP media | contra la ruta anterior |
 |---|---|---|
 | anterior (`dfmf_sparse`) | 0.732 $\pm$ 0.003 | |
-| `fit` + `transform` | 0.722 $\pm$ 0.006 | -0.010 $\pm$ 0.004 |
-| `fit` con máscaras | 0.716 $\pm$ 0.005 | -0.017 $\pm$ 0.002 |
+| `fuse` + `transform` | 0.722 $\pm$ 0.006 | -0.010 $\pm$ 0.004 |
+| `fuse` con máscaras | 0.716 $\pm$ 0.005 | -0.017 $\pm$ 0.002 |
 
 La ruta nueva no generaliza mejor **para predecir**. Para agrupar sí, y por un margen
 grande: ver la sección de co-clustering. Las causas de la diferencia en predicción que
@@ -94,10 +94,10 @@ principal para usarla. El cluster de una película es el argmax de su fila en
 | azar | 0.017 | -0.000 | 1.000 |
 | k-means sobre ratings | 0.083 | 0.015 | 0.970 |
 | k-means sobre elenco | 0.030 | 0.002 | 1.000 |
-| `fit` sin ver los géneros | 0.140 | 0.051 | 1.190 |
+| `fuse` sin ver los géneros | 0.140 | 0.051 | 1.190 |
 | `dfmf_sparse` | 0.579 | 0.464 | 1.870 |
-| `fit` sin gauge | 0.620 | 0.509 | 1.934 |
-| `fit` con gauge por columnas | **0.756** | **0.741** | 1.992 |
+| `fuse` sin gauge | 0.620 | 0.509 | 1.934 |
+| `fuse` con gauge por columnas | **0.756** | **0.741** | 1.992 |
 
 Coherencia es cuántas veces más probable es que dos películas del mismo grupo compartan
 un género, comparado con dos al azar. No necesita elegir un género dominante, así que no
@@ -119,7 +119,7 @@ entre sus miembros. Los que fallan cargan hacia géneros raros como IMAX o Film-
 
 Advertencia para no sobreleer la primera tabla: la relación de géneros entra al ajuste,
 así que recuperar géneros es en parte tautológico. La fila que mide agrupación no
-supervisada es `fit` sin ver los géneros, con NMI 0.140. Es modesto, pero sigue estando
+supervisada es `fuse` sin ver los géneros, con NMI 0.140. Es modesto, pero sigue estando
 por encima de k-means sobre las mismas matrices (0.083).
 
 Mismo modelo, dos motores, con el mismo evaluador aguas abajo:

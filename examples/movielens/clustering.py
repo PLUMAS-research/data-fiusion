@@ -39,7 +39,7 @@ import scipy.sparse as sp
 from sklearn.cluster import KMeans
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 
-from datafiusion import Relation, dfmf_sparse, fit, normalize_relations
+from datafiusion import Relation, dfmf_sparse, fuse, normalize_relations
 
 import datos as datos_movielens
 from datos import CLAVE_GENERO
@@ -169,9 +169,9 @@ ranks = {"pelicula": N_CLUSTERS, "genero": RANKS_FIJOS["genero"]}
 ranks.update({t: RANKS_FIJOS[t] for t in VISTAS})
 
 configuraciones = {
-    "fit, gauge por columnas": dict(gauge="column"),
-    "fit, sin gauge": dict(gauge=None),
-    "fit, eta=0.5": dict(gauge="column", eta=0.5),
+    "fuse, gauge por columnas": dict(gauge="column"),
+    "fuse, sin gauge": dict(gauge=None),
+    "fuse, eta=0.5": dict(gauge="column", eta=0.5),
 }
 # nndsvd es determinista e ignora random_state, asi que repetirlo con varias
 # semillas da el mismo ajuste y un error estandar de cero que no significa
@@ -186,7 +186,7 @@ ranks_ciego = {k: v for k, v in ranks.items() if k != "genero"}
 
 for semilla in SEMILLAS:
     for nombre, opciones in configuraciones.items():
-        modelo = fit(relaciones(VISTAS), ranks, max_iter=MAX_ITER, tol=1e-7,
+        modelo = fuse(relaciones(VISTAS), ranks, max_iter=MAX_ITER, tol=1e-7,
                      init="random", random_state=semilla, **opciones)
         etiquetas = clusters_de(modelo.G["pelicula"])
         resultados.append(evaluar(nombre, etiquetas, Y, dominante, semilla))
@@ -201,16 +201,16 @@ for semilla in SEMILLAS:
     # solamente. Es la situacion real cuando no hay etiquetas, y la unica
     # que mide agrupacion no supervisada: con la relacion de generos dentro
     # del ajuste, recuperar generos es en buena parte tautologico.
-    modelo_ciego = fit(relaciones(VISTAS, con_genero=False), ranks_ciego,
+    modelo_ciego = fuse(relaciones(VISTAS, con_genero=False), ranks_ciego,
                        max_iter=MAX_ITER, tol=1e-7, init="random", random_state=semilla)
-    resultados.append(evaluar("fit, sin ver generos",
+    resultados.append(evaluar("fuse, sin ver generos",
                               clusters_de(modelo_ciego.G["pelicula"]),
                               Y, dominante, semilla))
 
 # Corrida unica con nndsvd, que es el default y no depende de la semilla.
 deterministas = []
 for nombre, opciones in configuraciones.items():
-    modelo = fit(relaciones(VISTAS), ranks, max_iter=MAX_ITER, tol=1e-7,
+    modelo = fuse(relaciones(VISTAS), ranks, max_iter=MAX_ITER, tol=1e-7,
                  init="nndsvd", **opciones)
     etiquetas = clusters_de(modelo.G["pelicula"])
     fila = evaluar(nombre, etiquetas, Y, dominante)
@@ -219,16 +219,16 @@ for nombre, opciones in configuraciones.items():
 G_nnd, _ = dfmf_sparse(R=R_legacy, ranks=ranks, lambda_G=0.0, lambda_S=1e-2,
                        max_iter=MAX_ITER, init="nndsvd")
 deterministas.append(evaluar("dfmf_sparse", clusters_de(G_nnd["pelicula"]), Y, dominante))
-modelo_ciego_nnd = fit(relaciones(VISTAS, con_genero=False), ranks_ciego,
+modelo_ciego_nnd = fuse(relaciones(VISTAS, con_genero=False), ranks_ciego,
                        max_iter=MAX_ITER, tol=1e-7, init="nndsvd")
-deterministas.append(evaluar("fit, sin ver generos",
+deterministas.append(evaluar("fuse, sin ver generos",
                              clusters_de(modelo_ciego_nnd.G["pelicula"]), Y, dominante))
 
 
 # %%
 crudo = pd.DataFrame(resultados)
-orden = ["azar", "k-means ratings", "k-means elenco", "fit, sin ver generos",
-         "dfmf_sparse", "fit, sin gauge", "fit, eta=0.5", "fit, gauge por columnas"]
+orden = ["azar", "k-means ratings", "k-means elenco", "fuse, sin ver generos",
+         "dfmf_sparse", "fuse, sin gauge", "fuse, eta=0.5", "fuse, gauge por columnas"]
 tabla = crudo.groupby("metodo")[["NMI", "ARI", "coherencia"]].agg(["mean", "sem"])
 tabla = tabla.loc[[m for m in orden if m in tabla.index]]
 
@@ -254,7 +254,7 @@ if legibles:
 pivote = crudo.pivot_table(index="semilla", columns="metodo", values=["NMI", "ARI"])
 print("\ncontra dfmf_sparse, pareado por semilla:")
 for metrica in ("NMI", "ARI"):
-    for metodo in ("fit, gauge por columnas", "fit, sin gauge"):
+    for metodo in ("fuse, gauge por columnas", "fuse, sin gauge"):
         diferencia = pivote[(metrica, metodo)] - pivote[(metrica, "dfmf_sparse")]
         sem = diferencia.std(ddof=1) / np.sqrt(len(diferencia))
         veces = abs(diferencia.mean()) / max(sem, 1e-12)
@@ -269,7 +269,7 @@ crudo.to_csv(DIR_SALIDA / "clustering.csv", index=False)
 # El otro lado del co-clustering: que dice el backbone. S[etiquetas] conecta
 # los grupos de pelicula con los de genero, asi que cada grupo de peliculas
 # deberia mapear a generos reconocibles.
-modelo = fit(relaciones(VISTAS), ranks, max_iter=MAX_ITER, tol=1e-7,
+modelo = fuse(relaciones(VISTAS), ranks, max_iter=MAX_ITER, tol=1e-7,
              init="nndsvd", random_state=SEMILLA)
 etiquetas = clusters_de(modelo.G["pelicula"])
 perfil = modelo.S["etiquetas"] @ modelo.G["genero"].T

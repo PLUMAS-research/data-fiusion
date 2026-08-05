@@ -114,7 +114,7 @@ un modelo de conteo que no incorpore ese reponderado parte en desventaja.
 El ARI de TF-IDF coincide con el 0.185 de la fila sin supervisar del experimento
 anterior, que usa la misma representación y protocolo.
 
-## Poisson contra la vara cuadrática
+## Poisson contra la referencia cuadrática
 
 `poisson_vs_cuadratica.py` mide la familia Poisson (`Relation(family="poisson")`)
 contra esa referencia, con el criterio declarado antes de correr: ganarle al ARI
@@ -131,8 +131,8 @@ El criterio no se cumplió, así que no se afirma que la likelihood de conteo su
 la cuadrática bien transformada. Lo que sí muestran los números:
 
 - Poisson sobre conteos crudos (0.113) queda al nivel de la mejor transformación
-  estabilizadora bajo la cuadrática (log1p, 0.114): la likelihood compra por
-  construcción lo que la transformación compra a mano, y nada más.
+  estabilizadora bajo la cuadrática (log1p, 0.114): la likelihood incorpora por
+  construcción la corrección que la transformación hace a mano, y no más que eso.
 - El reponderado idf ayuda bajo ambas pérdidas (0.113 a 0.151 en Poisson, 0.114 a
   0.185 en cuadrática). La pieza que sostiene el resultado es el reponderado por
   especificidad, no la forma de la pérdida.

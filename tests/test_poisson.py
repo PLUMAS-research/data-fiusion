@@ -12,7 +12,7 @@ import pytest
 import scipy.sparse as sp
 from sklearn.metrics import adjusted_rand_score
 
-from datafiusion import FusionModel, Relation, fit
+from datafiusion import FusionModel, Relation, fuse
 
 
 def _bloques(semilla=0, n_filas=90, n_cols=60, grupos=3, alto=8.0, bajo=0.2):
@@ -32,7 +32,7 @@ def _relacion(X, **kwargs):
 
 def test_la_desviacion_baja_monotonamente():
     X, _ = _bloques()
-    modelo = fit(_relacion(X), {"fila": 3, "columna": 3}, max_iter=40,
+    modelo = fuse(_relacion(X), {"fila": 3, "columna": 3}, max_iter=40,
                  tol=None, init="random", random_state=0)
     h = modelo.history
     subidas = np.diff(h) > h[:-1] * 1e-8 + 1e-12
@@ -42,7 +42,7 @@ def test_la_desviacion_baja_monotonamente():
 
 def test_recupera_los_bloques_plantados():
     X, grupo_fila = _bloques()
-    modelo = fit(_relacion(X), {"fila": 3, "columna": 3}, max_iter=100,
+    modelo = fuse(_relacion(X), {"fila": 3, "columna": 3}, max_iter=100,
                  random_state=0)
     grupos = modelo.factor("fila").argmax(axis=1)
     assert adjusted_rand_score(grupo_fila, grupos) > 0.95
@@ -51,7 +51,7 @@ def test_recupera_los_bloques_plantados():
 
 def test_factores_y_backbone_no_negativos():
     X, _ = _bloques()
-    modelo = fit(_relacion(X), {"fila": 3, "columna": 3}, max_iter=30,
+    modelo = fuse(_relacion(X), {"fila": 3, "columna": 3}, max_iter=30,
                  init="random", random_state=1)
     for factor in modelo.G.values():
         assert (factor >= 0).all()
@@ -64,7 +64,7 @@ def test_fusion_de_dos_relaciones_poisson():
     Y, _ = _bloques(semilla=2, n_cols=30)
     R = {"a": Relation(src="fila", dst="c1", matrix=X, family="poisson"),
          "b": Relation(src="fila", dst="c2", matrix=Y, family="poisson")}
-    modelo = fit(R, {"fila": 3, "c1": 3, "c2": 3}, max_iter=60, random_state=0)
+    modelo = fuse(R, {"fila": 3, "c1": 3, "c2": 3}, max_iter=60, random_state=0)
     assert np.isfinite(modelo.history).all()
     assert modelo.history[-1] < modelo.history[0]
     grupos = modelo.factor("fila").argmax(axis=1)
@@ -76,7 +76,7 @@ def test_supervision_ancla_componentes():
     permitido = np.ones((X.shape[0], 3), dtype=bool)
     permitido[:30] = False
     permitido[:30, 0] = True
-    modelo = fit(_relacion(X), {"fila": 3, "columna": 3},
+    modelo = fuse(_relacion(X), {"fila": 3, "columna": 3},
                  supervision={"fila": permitido}, max_iter=30, random_state=0)
     assert (modelo.G["fila"][:30, 1:] == 0).all()
 
@@ -98,7 +98,7 @@ def test_fusion_mixta_poisson_y_gaussiana():
                              family="poisson"),
          "etiquetas": Relation(src="fila", dst="clase", matrix=Y,
                                rows=np.arange(0, 90, 2))}
-    modelo = fit(R, {"fila": 3, "columna": 3, "clase": 3}, max_iter=80,
+    modelo = fuse(R, {"fila": 3, "columna": 3, "clase": 3}, max_iter=80,
                  tol=None, random_state=0)
     assert modelo.params["family"] == "mixed"
     assert np.isfinite(modelo.history).all()
@@ -127,8 +127,8 @@ def test_mascara_gaussiana_en_fit_mixto_no_filtra():
     sucia = dict(base)
     sucia["etiquetas"] = Relation(src="fila", dst="clase", matrix=Y_sucia,
                                   rows=np.arange(60))
-    m1 = fit(base, **comun)
-    m2 = fit(sucia, **comun)
+    m1 = fuse(base, **comun)
+    m2 = fuse(sucia, **comun)
     for tipo in m1.G:
         assert np.abs(m1.G[tipo] - m2.G[tipo]).max() < 1e-12, tipo
 
@@ -143,7 +143,7 @@ def test_el_peso_entre_familias_responde():
         R = {"conteos": Relation(src="fila", dst="columna", matrix=X,
                                  family="poisson"),
              "etiquetas": Relation(src="fila", dst="clase", matrix=Y)}
-        return fit(R, {"fila": 3, "columna": 3, "clase": 3},
+        return fuse(R, {"fila": 3, "columna": 3, "clase": 3},
                    weights={"etiquetas": w}, max_iter=20, tol=None,
                    random_state=0)
 
@@ -157,7 +157,7 @@ def test_resume_de_fit_mixto():
     R = {"conteos": Relation(src="fila", dst="columna", matrix=X,
                              family="poisson"),
          "etiquetas": Relation(src="fila", dst="clase", matrix=Y)}
-    modelo = fit(R, {"fila": 3, "columna": 3, "clase": 3}, max_iter=15,
+    modelo = fuse(R, {"fila": 3, "columna": 3, "clase": 3}, max_iter=15,
                  tol=None, random_state=0)
     reanudado = modelo.resume(R, max_iter=5)
     assert reanudado.n_iter == modelo.n_iter + 5
@@ -168,25 +168,25 @@ def test_resume_de_fit_mixto():
 def test_combinaciones_no_soportadas():
     X, _ = _bloques()
     with pytest.raises(ValueError, match="row mask"):
-        fit(_relacion(X, rows=np.arange(10)), {"fila": 3, "columna": 3}, max_iter=2)
+        fuse(_relacion(X, rows=np.arange(10)), {"fila": 3, "columna": 3}, max_iter=2)
     with pytest.raises(ValueError, match="entry weights"):
-        fit(_relacion(X, entry_weights=np.ones(X.nnz)),
+        fuse(_relacion(X, entry_weights=np.ones(X.nnz)),
             {"fila": 3, "columna": 3}, max_iter=2)
     with pytest.raises(ValueError, match="sparse"):
-        fit({"c": Relation(src="fila", dst="columna", matrix=np.ones((6, 4)),
+        fuse({"c": Relation(src="fila", dst="columna", matrix=np.ones((6, 4)),
                            family="poisson")}, {"fila": 2, "columna": 2}, max_iter=2)
     negativa = sp.csr_matrix(-np.eye(5))
     with pytest.raises(ValueError, match="negative"):
-        fit({"c": Relation(src="fila", dst="columna", matrix=negativa,
+        fuse({"c": Relation(src="fila", dst="columna", matrix=negativa,
                            family="poisson")}, {"fila": 2, "columna": 2}, max_iter=2)
     with pytest.raises(ValueError, match="not supported"):
-        fit(_relacion(X), {"fila": 3, "columna": 3}, max_iter=2,
+        fuse(_relacion(X), {"fila": 3, "columna": 3}, max_iter=2,
             graphs={"fila": sp.eye(90)}, alpha_graph=0.5)
 
 
 def test_save_load_resume_poisson(tmp_path):
     X, _ = _bloques()
-    modelo = fit(_relacion(X), {"fila": 3, "columna": 3}, max_iter=15,
+    modelo = fuse(_relacion(X), {"fila": 3, "columna": 3}, max_iter=15,
                  tol=None, random_state=0)
     assert modelo.params["family"] == "poisson"
     modelo.save(tmp_path / "modelo")
@@ -199,7 +199,7 @@ def test_save_load_resume_poisson(tmp_path):
 
 def test_transform_se_rechaza_en_poisson():
     X, _ = _bloques()
-    modelo = fit(_relacion(X), {"fila": 3, "columna": 3}, max_iter=10,
+    modelo = fuse(_relacion(X), {"fila": 3, "columna": 3}, max_iter=10,
                  random_state=0)
     with pytest.raises(ValueError, match="poisson"):
         modelo.transform(_relacion(X), target="fila")
@@ -207,7 +207,7 @@ def test_transform_se_rechaza_en_poisson():
 
 def test_reconstruct_entries_aproxima_los_conteos():
     X, _ = _bloques()
-    modelo = fit(_relacion(X), {"fila": 3, "columna": 3}, max_iter=100,
+    modelo = fuse(_relacion(X), {"fila": 3, "columna": 3}, max_iter=100,
                  random_state=0)
     filas, columnas = X.nonzero()
     pred = modelo.reconstruct_entries("conteos", filas, columnas)

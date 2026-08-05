@@ -35,7 +35,7 @@ from sklearn.datasets import fetch_20newsgroups
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 
-from datafiusion import Relation, fit
+from datafiusion import Relation, fuse
 
 
 DIR_SALIDA = Path(os.environ.get("DIR_SALIDA", Path(__file__).parent / "output"))
@@ -96,7 +96,7 @@ def ajustar(supervisados, semilla):
     ranks = {"documento": n_categorias, "termino": RANK_TERMINO}
     supervision = ({"documento": matriz_de_supervision(supervisados)}
                    if len(supervisados) else None)
-    return fit(R, ranks, supervision=supervision, max_iter=MAX_ITER, tol=1e-7,
+    return fuse(R, ranks, supervision=supervision, max_iter=MAX_ITER, tol=1e-7,
                init="random", random_state=semilla)
 
 

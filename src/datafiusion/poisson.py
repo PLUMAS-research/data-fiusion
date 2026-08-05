@@ -1,6 +1,6 @@
 """Count (Poisson/KL) and mixed-family tri-factorization.
 
-`fit` dispatches here when at least one relation carries
+`fuse` dispatches here when at least one relation carries
 family="poisson". Poisson relations contribute the generalized KL
 divergence
 
@@ -36,7 +36,7 @@ for poisson. Both are 0 at a perfect fit. So that `weights` reads as a
 loss share ACROSS families too, the KL gradient of each poisson relation
 is normalized by its null deviance, mirroring the Frobenius
 normalization of the gaussian side; without this, a count relation with
-large mass drowns every gaussian term and no reasonable weight can
+large mass dominates every gaussian term numerically and no reasonable weight can
 compensate (measured on Last.fm: the label weight had no effect at all
 between 0.3 and 10). Pure poisson fits are unaffected: the
 multiplicative ratio is invariant to scaling numerator and denominator
@@ -59,7 +59,7 @@ def fit_families(relations, ranks, weights=None, supervision=None,
                  max_iter=100, tol=1e-5, init="nndsvd", random_state=None,
                  block_rows=200_000, verbose=0, callback=None,
                  warm_start=None, extra_params=None):
-    """Fit relations of mixed (or pure poisson) families. Called through `fit`."""
+    """Fit relations of mixed (or pure poisson) families. Called through `fuse`."""
     gaussianas = {n: r for n, r in relations.items() if r.family == "gaussian"}
     poissons = {n: r for n, r in relations.items() if r.family == "poisson"}
 

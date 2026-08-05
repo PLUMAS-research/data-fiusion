@@ -33,7 +33,7 @@ import pandas as pd
 import scipy.sparse as sp
 from sklearn.metrics import adjusted_rand_score
 
-from datafiusion import Relation, fit
+from datafiusion import Relation, fuse
 
 import datos as datos_movielens
 from datos import CLAVE_GENERO
@@ -124,12 +124,12 @@ for semilla in SEMILLAS:
     ranks.update({t: RANKS_FIJOS[t] for t in VISTAS})
 
     # Sin anclaje: las componentes son grupos latentes cualesquiera.
-    libre = fit(relaciones(), ranks, weights={ETIQUETAS: 3.0}, max_iter=MAX_ITER,
+    libre = fuse(relaciones(), ranks, weights={ETIQUETAS: 3.0}, max_iter=MAX_ITER,
                 tol=1e-7, init="random", random_state=semilla)
     filas.append(evaluar("sin anclaje", libre, semilla))
 
     # Con anclaje TS-NMF: la componente j representa al genero j.
-    anclado = fit(relaciones(), ranks, weights={ETIQUETAS: 3.0},
+    anclado = fuse(relaciones(), ranks, weights={ETIQUETAS: 3.0},
                   supervision={"pelicula": permitido}, max_iter=MAX_ITER,
                   tol=1e-7, init="random", random_state=semilla)
     filas.append(evaluar("anclado (TS-NMF)", anclado, semilla))

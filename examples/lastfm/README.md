@@ -57,19 +57,19 @@ cumplió: el brazo mezclado pierde contra la monofamilia bien transformada.
 Ambos brazos superan con claridad al baseline, así que el factor compartido sí
 transporta señal de las escuchas a los tags; la pregunta era qué pérdida la
 transporta mejor, y la respuesta es la cuadrática sobre log1p. El mecanismo
-probable: la KL es linealmente sensible a la masa, así que el ajuste se lo llevan
-los conteos gigantes de los artistas y usuarios de cabeza (hasta 352 mil
-reproducciones), mientras que log1p declara que la magnitud satura, y la señal que
+probable: la KL es linealmente sensible a la masa, así que el ajuste queda dominado
+por los conteos más grandes (hasta 352 mil reproducciones de un usuario a un
+artista), mientras que log1p declara que la magnitud satura, y la señal que
 predice tags vive en ese régimen saturado. Es consistente con el resultado de 20
-Newsgroups (la likelihood compra lo que la transformación compra, como máximo) y
+Newsgroups (la likelihood logra, a lo más, lo mismo que la transformación) y
 con la práctica estándar en retroalimentación implícita, donde los conteos de
 reproducción se comprimen con log antes de factorizar.
 
 Dos salvedades de protocolo. La grilla de pesos se extendió tras una primera
-corrida de validación (la nota está en el script); esa corrida además destapó un
+corrida de validación (la nota está en el script); esa corrida además encontró un
 defecto real de la librería, corregido antes de la corrida final: sin calibrar el
-gradiente KL por la desviación nula, la relación de conteos aplastaba a la
-gaussiana y el peso entre familias no tenía ningún efecto. Y el brazo A eligió el
+gradiente KL por la desviación nula, la relación de conteos dominaba
+numéricamente a la gaussiana y el peso entre familias no tenía ningún efecto. Y el brazo A eligió el
 borde de la grilla (peso 100) con la curva de validación ya casi plana (0.318 a
 0.323 entre 30 y 100), así que el margen restante por ese lado es chico.
 
@@ -77,4 +77,9 @@ borde de la grilla (peso 100) con la curva de validación ya casi plana (0.318 a
 
 ```bash
 uv run python examples/lastfm/comparacion.py
+uv run python examples/lastfm/diagrama.py
 ```
+
+`diagrama.py` produce el esquema de la fusión (tipos, relaciones, dimensiones,
+densidades, transformación y máscara) en PDF vectorial y PNG, con
+`datafiusion.diagram.fusion_diagram`.

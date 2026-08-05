@@ -6,8 +6,8 @@ the only thing that differs is the method.
 
   legacy       dfmf_sparse + fold_in_entities + predict_attribute, with
                the clamp applied outside the library
-  fold-in      fit + FusionModel.transform, non negative by construction
-  enmascarado  fit with every movie present and the genre relation masked
+  fold-in      fuse + FusionModel.transform, non negative by construction
+  enmascarado  fuse with every movie present and the genre relation masked
                to the labelled rows, so held-out movies get their factor
                from ratings and cast without their label entering the loss
 
@@ -96,7 +96,7 @@ def protocolo_enmascarado(piezas, etiquetadas, objetivo, rank, peso, semilla):
     for tipo in VISTAS:
         R[NOMBRES[tipo]] = Relation(src="pelicula", dst=tipo,
                                     matrix=piezas[("pelicula", tipo)])
-    modelo = fit(R, ranks_de(rank), weights={ETIQUETAS: peso}, max_iter=MAX_ITER,
+    modelo = fuse(R, ranks_de(rank), weights={ETIQUETAS: peso}, max_iter=MAX_ITER,
                  tol=TOL, init="nndsvd", random_state=semilla)
     return modelo.predict_proba(target="genero", views=[ETIQUETAS],
                                 known={"pelicula": objetivo})
@@ -109,7 +109,7 @@ def protocolo_foldin_nuevo(piezas, etiquetadas, objetivo, rank, peso, semilla):
     for tipo in VISTAS:
         R[NOMBRES[tipo]] = Relation(src="pelicula", dst=tipo,
                                     matrix=piezas[("pelicula", tipo)][etiquetadas])
-    modelo = fit(R, ranks_de(rank), weights={ETIQUETAS: peso}, max_iter=MAX_ITER,
+    modelo = fuse(R, ranks_de(rank), weights={ETIQUETAS: peso}, max_iter=MAX_ITER,
                  tol=TOL, init="nndsvd", random_state=semilla)
     nuevas = {NOMBRES[t]: Relation(src="pelicula", dst=t,
                                    matrix=piezas[("pelicula", t)][objetivo])
@@ -152,7 +152,7 @@ PROTOCOLOS = {
 
 # %%
 print("=" * 78)
-print("MovieLens: legacy contra `fit`, mismas semillas y misma grilla")
+print("MovieLens: legacy contra `fuse`, mismas semillas y misma grilla")
 print("=" * 78)
 print(f"semillas: {SEMILLAS}, rank en {GRILLA_RANK}, peso en {GRILLA_PESO}")
 print(f"max_iter={MAX_ITER}, tol={TOL}")

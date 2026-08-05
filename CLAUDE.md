@@ -47,13 +47,13 @@ Four layers, with the API consolidated around patterns from real use.
 
 4. **DataFrame wrapper (`base.py`).** `DataFusionModel` resolves index coherence across DataFrames per type (union, fill with `fill_value`), exposes `factor`, `backbone`, `reconstruct`, `chain`, `relation_profiles` returning DataFrames. Useful for pandas-first workflows, but it densifies each relation to align indices, so it must not be used on large data; operate on `Relation` objects or on `dict[(src, dst), list[sparse]]` directly instead.
 
-5. **Diagram (`diagram.py`).** `fusion_diagram(model)` renders the relation graph as nested rectangles. Optional, depends on `matplotlib` and `seaborn`.
+5. **Diagram (`diagram.py`).** `fusion_diagram(source, ranks=None, positions=None)` draws the publication-oriented schema of a fusion setup: entity types as boxes (size and rank), relations as arrows annotated with dimensions, density, preprocess and masks, colored by family (Okabe-Ito). Accepts named relations, the legacy keyed dict or a `FusionModel`. Optional, depends only on `matplotlib`. Example figure: `examples/lastfm/diagrama.py`.
 
 6. **Sparse primitives (`ops.py`).** `sddmm(pattern, A, B)` evaluates A @ B^T at the stored entries of a sparse pattern in O(nnz * c), blocked; `product_at(A, B, rows, cols)` is the same kernel on coordinate lists. They are what makes entry weights and count likelihoods expressible without materializing anything of relation size.
 
-7. **Named value transforms (`preprocess.py`).** `Relation(preprocess=...)` names transforms from a closed registry ("log1p", "sqrt", shifted "anscombe", "idf"); `fit` applies them once (learning the idf vector from the training data), stores names in `params["preprocess"]` and state in `params["idf"]` (persisted by `save` like supervision and masks), and `FusionModel.transform` and `loss` reapply the SAME chain with the SAME state to incoming raw data. Closed registry on purpose: callables cannot persist. The caller's matrix is never modified (only the data array is copied). An incoming relation declaring a different chain than the fit raises; idf cannot apply when the new entities are on the column side; `reconstruct_entries(original=True)` inverts the chain. All transforms map 0 to 0, so patterns and `entry_weights` alignment survive.
+7. **Named value transforms (`preprocess.py`).** `Relation(preprocess=...)` names transforms from a closed registry ("log1p", "sqrt", shifted "anscombe", "idf"); `fuse` applies them once (learning the idf vector from the training data), stores names in `params["preprocess"]` and state in `params["idf"]` (persisted by `save` like supervision and masks), and `FusionModel.transform` and `loss` reapply the SAME chain with the SAME state to incoming raw data. Closed registry on purpose: callables cannot persist. The caller's matrix is never modified (only the data array is copied). An incoming relation declaring a different chain than the fit raises; idf cannot apply when the new entities are on the column side; `reconstruct_entries(original=True)` inverts the chain. All transforms map 0 to 0, so patterns and `entry_weights` alignment survive.
 
-8. **Count and mixed families (`poisson.py`).** `fit` dispatches to `fit_families` when any relation carries `family="poisson"`. Poisson relations contribute generalized KL (S non-negative, multiplicative; the column gauge is compensated in S); gaussian relations contribute through the same `_FitState` machinery as the classic path, including row masks and entry weights. The shared factors receive ONE joint update: the positive root of the sum of both auxiliary majorizers, which reduces exactly to the classic ratio without poisson terms and to the KL rule without gaussian terms (derivation in the module docstring). The loss is the mean of normalized per-relation terms (relative squared error or deviance ratio). The balance BETWEEN families has no natural unit: relative `weights` must be validated. Not supported with poisson relations yet: `transform`, row masks and entry weights on the poisson relation itself, graphs; column or row weighting is expressed by scaling the data. `resume` works; `params["family"]` ("poisson" or "mixed") is informational and popped by resume.
+8. **Count and mixed families (`poisson.py`).** `fuse` dispatches to `fit_families` when any relation carries `family="poisson"`. Poisson relations contribute generalized KL (S non-negative, multiplicative; the column gauge is compensated in S); gaussian relations contribute through the same `_FitState` machinery as the classic path, including row masks and entry weights. The shared factors receive ONE joint update: the positive root of the sum of both auxiliary majorizers, which reduces exactly to the classic ratio without poisson terms and to the KL rule without gaussian terms (derivation in the module docstring). The loss is the mean of normalized per-relation terms (relative squared error or deviance ratio). The balance BETWEEN families has no natural unit: relative `weights` must be validated. Not supported with poisson relations yet: `transform`, row masks and entry weights on the poisson relation itself, graphs; column or row weighting is expressed by scaling the data. `resume` works; `params["family"]` ("poisson" or "mixed") is informational and popped by resume.
 
 ## Use patterns documented in `README.md`
 
@@ -78,7 +78,7 @@ The README covers these end-to-end. When extending or debugging, mirror the stru
 
 - scikit-fusion stores relations as dense `numpy.ndarray` (or `numpy.ma.MaskedArray` for missing data). `data-fiusion` stores them as `scipy.sparse.csr_matrix` and uses dense factors only.
 - scikit-fusion uses `FusionGraph` / `ObjectType` / `Relation` as user-facing primitives. `data-fiusion` uses plain dicts keyed by `(src_type, dst_type)`.
-- scikit-fusion supports `n_run > 1` parallel restarts through `joblib`. `data-fiusion` offers sequential restarts through `fit(n_runs=...)`; the legacy `dfmf_sparse` runs a single factorization per call.
+- scikit-fusion supports `n_run > 1` parallel restarts through `joblib`. `data-fiusion` offers sequential restarts through `fuse(n_runs=...)`; the legacy `dfmf_sparse` runs a single factorization per call.
 - scikit-fusion uses `np.random.RandomState`; `data-fiusion` uses `np.random.default_rng`. Direct numerical comparison is not meaningful.
 - scikit-fusion uses `pinv(G^T G)`; `data-fiusion` uses `np.linalg.solve(G^T G + lambda I, ...)`. Equivalent at `lambda=0` in exact arithmetic.
 
@@ -130,7 +130,8 @@ suspicious when two implementations report the same number to the megabyte.
 
 ## Two fitting paths
 
-`fit` (in `model.py`) is the current API; `dfmf_sparse` (in `core.py`) is frozen.
+`fuse` (in `model.py`) is the current API, with `fit` kept as an alias;
+`dfmf_sparse` (in `core.py`) is frozen.
 The design and the reasoning behind it are in `docs/diseno-regularizacion.md`.
 The task-oriented user documentation is `docs/guia-de-uso.md`; its code snippets
 are meant to run as written, so keep it in sync when the API changes.
@@ -139,7 +140,7 @@ The legacy path is frozen **literally**, not as a wrapper over the new loop:
 `tests/test_golden.py` pins its output, so results produced with it stay reproducible. The cost is roughly 50
 duplicated lines of update loop. Do not "unify" them without a reason.
 
-What `fit` adds: relations by name (so two matrices between the same pair of
+What `fuse` adds: relations by name (so two matrices between the same pair of
 types stop being positional), row observation masks, a column gauge, graph
 smoothing calibrated against the data energy, a loss trace with a stopping
 tolerance, `transform` with a non-negative fold-in that reapplies the fit-time
@@ -160,7 +161,7 @@ override the null in meta.json. `transform` honours `Relation.rows` (each
 new entity is solved from the relations it is observed in) and reports new
 entities without observations in the derived model's `empty_rows`; a
 transform-derived model cannot be resumed. Relation and type names are used
-as file names by `save`, so `fit` rejects names with path separators.
+as file names by `save`, so `fuse` rejects names with path separators.
 Row masks are sets: `Relation` deduplicates them and rejects float dtypes.
 
 **No L2 penalty on G is offered, and this is deliberate.** After the closed-form
@@ -172,7 +173,7 @@ regularize are the rank, `weights`, `masks` and `alpha_graph`.
 
 **`weights` does not mean the same thing in the two paths.** `normalize_relations`
 multiplies the matrix (the weight lands inside the norm, so its effect is
-quadratic and the reconstruction target moves); `fit` weights the loss term.
+quadratic and the reconstruction target moves); `fuse` weights the loss term.
 The second is the correct formulation, but a number carried over from old code
 will not reproduce the old fit.
 
@@ -186,8 +187,8 @@ init, four seeds, against genres:
 |---|---|---|
 | k-means on the same matrices | 0.083 | 0.015 |
 | `dfmf_sparse` | 0.579 | 0.464 |
-| `fit` without gauge | 0.620 | 0.509 |
-| `fit` with column gauge | **0.756** | **0.741** |
+| `fuse` without gauge | 0.620 | 0.509 |
+| `fuse` with column gauge | **0.756** | **0.741** |
 
 Paired by seed against `dfmf_sparse`: +0.177 NMI (15.7 SE) and +0.277 ARI (14.7 SE).
 Without the gauge the advantage drops to +0.041, so the gauge is what is doing the
@@ -198,7 +199,7 @@ buys independence from the initializer.
 
 Do not read the absolute numbers as unsupervised clustering quality: the genre relation
 is IN the fit, so recovering genres is partly tautological. The unsupervised row is
-`fit` without the genre relation, at NMI 0.140, still above k-means at 0.083.
+`fuse` without the genre relation, at NMI 0.140, still above k-means at 0.083.
 
 ### Measured: the new path does NOT generalize better at prediction
 
@@ -222,7 +223,7 @@ method. Anyone picking this up should test that before assuming the loop is at
 fault.
 
 So the two sides disagree, and which path to use depends on the task. For
-**clustering**, `fit` with the column gauge, by a wide margin. For **predicting** a
+**clustering**, `fuse` with the column gauge, by a wide margin. For **predicting** a
 held-out attribute the two are close and the old one is slightly ahead. The rest of
 the new path's justification is cost and correctness: constant memory in the loss, a
 fold-in verified against `scipy.optimize.nnls`, label validation that turns a silent
@@ -254,5 +255,5 @@ back to the library:
   The source type's rank is the lever that controls overfitting instead.
 
 New relations passed to `fold_in_entities` must be scaled by the *training*
-Frobenius norm and weight from `normalize_relations`, not their own. `fit` plus
+Frobenius norm and weight from `normalize_relations`, not their own. `fuse` plus
 `FusionModel.transform` does this for you; the legacy path does not.

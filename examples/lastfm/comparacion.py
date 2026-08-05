@@ -26,7 +26,7 @@ los 100 tags), promediada sobre los artistas evaluados.
 Nota de protocolo: la grilla de pesos original (0.3 a 10) se extendio
 tras una primera corrida de validacion, porque el brazo A elegia el
 borde con la curva todavia subiendo y el brazo B no respondia al peso
-(el gradiente KL sin calibrar aplastaba al gaussiano; la calibracion
+(el gradiente KL sin calibrar dominaba numericamente al gaussiano; la calibracion
 por desviacion nula corrige eso en la libreria). La seleccion sigue
 siendo solo en validacion.
 
@@ -42,7 +42,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import average_precision_score
 
-from datafiusion import Relation, fit
+from datafiusion import Relation, fuse
 
 from datos import cargar
 
@@ -96,7 +96,7 @@ def ajustar(matriz_escuchas, familia, peso, semilla):
                                rows=entrenamiento)}
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        modelo = fit(R, RANKS, weights={"etiquetas": peso}, max_iter=MAX_ITER,
+        modelo = fuse(R, RANKS, weights={"etiquetas": peso}, max_iter=MAX_ITER,
                      tol=1e-6, init="random", random_state=semilla)
     return modelo.predict_proba(target="tag", views=["etiquetas"])
 

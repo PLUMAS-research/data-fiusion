@@ -31,7 +31,7 @@ Ejecucion: uv run python examples/semi_supervised.py
 import numpy as np
 import scipy.sparse as sp
 
-from datafiusion import Relation, fit
+from datafiusion import Relation, fuse
 
 
 SEMILLA = 0
@@ -78,7 +78,7 @@ def ajustar(Y_matriz, filas_observadas):
         "etiquetas": Relation(src="usuario", dst="clase",
                               matrix=sp.csr_matrix(Y_matriz), rows=filas_observadas),
     }
-    return fit(relaciones, RANKS, max_iter=300, tol=1e-7, init="nndsvd",
+    return fuse(relaciones, RANKS, max_iter=300, tol=1e-7, init="nndsvd",
                random_state=SEMILLA)
 
 
