@@ -116,7 +116,7 @@ def fold_in_entities(R_new, G, S, target_type, lambda_reg=1e-3,
     R_stacked = sp.hstack(blocks, format="csr") if any(sp.issparse(b) for b in blocks) else np.hstack(blocks)
     gram = D @ D.T + lambda_reg * np.eye(c_target)
     rhs = R_stacked @ D.T
-    X = rhs @ np.linalg.inv(gram)
+    X = np.linalg.solve(gram, rhs.T).T
     if not nonneg:
         return X
     return nonneg_refine(X, gram, rhs, lam=0.0, max_iter=max_iter, tol=tol)

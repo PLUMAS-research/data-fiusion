@@ -6,13 +6,22 @@ build-backend = "setuptools.build_meta"
 name = "data-fiusion"
 version = "0.1.0"
 description = "Sparse data fusion by non-negative matrix tri-factorization."
+readme = "README.md"
+authors = [{name = "Eduardo Graells-Garrido"}]
 requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
 dependencies = [
     "numpy>=1.22",
     "scipy>=1.9",
     "pandas>=1.5",
-    "cytoolz>=0.12",
 ]
+
+[project.urls]
+Repository = "https://github.com/PLUMAS-research/data-fiusion"
 
 [project.optional-dependencies]
 viz = ["matplotlib>=3.5", "seaborn>=0.12"]

@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from cytoolz import valmap
 from matplotlib.collections import PatchCollection
 from matplotlib.patches import Rectangle
 
@@ -24,7 +23,10 @@ def fusion_diagram(
             map(
                 lambda l: list(chain(*l)),
                 sorted(
-                    valmap(lambda x: x[0].shape, model.relation_definitions).items()
+                    {
+                        k: v[0].shape
+                        for k, v in model.relation_definitions.items()
+                    }.items()
                 ),
             )
         )

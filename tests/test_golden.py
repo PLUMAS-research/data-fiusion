@@ -1,14 +1,14 @@
 """Golden test: freeze the current numerical behaviour of dfmf_sparse.
 
-The public entry points that existing notebooks import (`dfmf_sparse` and
-`reconstruction_error`) must keep producing the same numbers while the
-internals are restructured. This test pins G, S and the reconstruction
-error for both initializations against a stored reference.
+The legacy entry points (`dfmf_sparse` and `reconstruction_error`) must
+keep producing the same numbers while the internals are restructured.
+This test pins G, S and the reconstruction error for both
+initializations against a stored reference.
 
 The reference is generated on first run and versioned afterwards. To
 regenerate it on purpose, delete tests/data/golden_*.npz and run again;
-any other diff means the legacy path changed and the notebooks in
-notebooks/ would no longer reproduce their published numbers.
+any other diff means the legacy path changed and results produced with
+it would no longer be reproducible.
 
 Run with: uv run pytest tests/test_golden.py -v
 """

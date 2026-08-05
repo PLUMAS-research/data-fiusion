@@ -17,37 +17,24 @@ So the comparison checks structural properties and qualitative parity:
   - Final reconstruction errors are within a factor of 2 of each other.
   - Both approach the noise floor on synthetic low-rank data.
 
-Run with:
+Run as a script for the full report:
 
     uv run python tests/test_compare_skfusion.py
 
+Run under pytest for a reduced parity check:
+
+    uv run pytest tests/test_compare_skfusion.py
+
 scikit-fusion is a development dependency and is not on PyPI, so it has
 to be installed from a checkout. If it is not importable, the script
-exits with code 2 and prints how to install it.
+exits with code 2 and prints how to install it; the pytest check skips.
 """
 
 import sys
 import numpy as np
 import scipy.sparse as sp
 
-if not hasattr(np, "float"):
-    np.float = float
-if not hasattr(np, "int"):
-    np.int = int
-
-import collections
-import collections.abc
-if not hasattr(collections, "Iterable"):
-    collections.Iterable = collections.abc.Iterable
-
 from datafiusion.core import dfmf_sparse, reconstruction_error
-
-try:
-    from skfusion import fusion as skf
-    HAS_SKFUSION = True
-except ImportError as e:
-    HAS_SKFUSION = False
-    IMPORT_ERROR = e
 
 
 def _patch_skfusion_par_bdot():
@@ -88,8 +75,29 @@ def _patch_skfusion_par_bdot():
     _dfmf._par_bdot = _par_bdot
 
 
-if HAS_SKFUSION:
+def _importar_skfusion():
+    """Apply compatibility shims, then import scikit-fusion.
+
+    scikit-fusion still references np.float, np.int and
+    collections.Iterable, so the shims must be in place before the
+    import. For this reason pytest.importorskip cannot replace this
+    function. Applies _patch_skfusion_par_bdot after the import and
+    returns the skfusion.fusion module. Raises ImportError if
+    scikit-fusion is not installed.
+    """
+    if not hasattr(np, "float"):
+        np.float = float
+    if not hasattr(np, "int"):
+        np.int = int
+
+    import collections
+    import collections.abc
+    if not hasattr(collections, "Iterable"):
+        collections.Iterable = collections.abc.Iterable
+
+    from skfusion import fusion as skf
     _patch_skfusion_par_bdot()
+    return skf
 
 
 def make_low_rank_data(n1, n2, n3, c1, c2, c3, noise, seed):
@@ -181,7 +189,7 @@ def _resume_dfmf_sparse(R, ranks, G_init, max_iter):
     return G, S
 
 
-def run_skfusion(R12, R13, R23, ranks, max_iter, seed):
+def run_skfusion(skf, R12, R13, R23, ranks, max_iter, seed):
     t1 = skf.ObjectType("t1", ranks[0])
     t2 = skf.ObjectType("t2", ranks[1])
     t3 = skf.ObjectType("t3", ranks[2])
@@ -229,6 +237,53 @@ def _first_under(trace, threshold, step=10):
     return f">{len(trace) * step}"
 
 
+def test_paridad_reducida():
+    """Reduced parity check: small matrices, few iterations.
+
+    Asserts equal factor and backbone dimensions, monotone descent of
+    both error traces, and final errors within a factor of 2.
+    """
+    import pytest
+
+    try:
+        skf = _importar_skfusion()
+    except ImportError as e:
+        pytest.skip(f"scikit-fusion no importable: {e}")
+
+    n1, n2, n3 = 24, 18, 12
+    c1, c2, c3 = 4, 3, 2
+    ranks = (c1, c2, c3)
+    max_iter = 50
+    seed = 0
+
+    R12, R13, R23, _ = make_low_rank_data(
+        n1, n2, n3, c1, c2, c3, noise=0.05, seed=seed
+    )
+    G_new, S_new, err_new = run_datafiusion(R12, R13, R23, ranks, max_iter, seed)
+    G_old, S_old, err_old = run_skfusion(skf, R12, R13, R23, ranks, max_iter, seed)
+
+    for t, n, c in (("t1", n1, c1), ("t2", n2, c2), ("t3", n3, c3)):
+        assert G_new[t].shape == (n, c)
+        assert G_old[t].shape == (n, c)
+    for par, dims in (
+        (("t1", "t2"), (c1, c2)),
+        (("t1", "t3"), (c1, c3)),
+        (("t2", "t3"), (c2, c3)),
+    ):
+        assert S_new[par][0].shape == dims
+        assert S_old[par][0].shape == dims
+
+    monotona_new, viol_new = check_monotone(err_new)
+    monotona_old, viol_old = check_monotone(err_old)
+    assert monotona_new, f"traza datafiusion no desciende ({viol_new} violaciones)"
+    assert monotona_old, f"traza skfusion no desciende ({viol_old} violaciones)"
+
+    razon = err_new[-1] / err_old[-1]
+    assert 0.5 <= razon <= 2.0, (
+        f"errores finales fuera de factor 2: {err_new[-1]:.4f} vs {err_old[-1]:.4f}"
+    )
+
+
 def main():
     n1, n2, n3 = 40, 30, 20
     c1, c2, c3 = 5, 4, 3
@@ -273,9 +328,11 @@ def main():
     print(f"  monotone descent: {'PASS' if svd_monotone else 'FAIL'} "
           f"({svd_violations} small increases tolerated)\n")
 
-    if not HAS_SKFUSION:
+    try:
+        skf = _importar_skfusion()
+    except ImportError as e:
         print("scikit-fusion not importable:")
-        print(f"  {IMPORT_ERROR}")
+        print(f"  {e}")
         print("\nInstall it from a checkout and run again:")
         print("  uv pip install -e <path to scikit-fusion> --python .venv/bin/python")
         print("  uv run python tests/test_compare_skfusion.py")
@@ -284,7 +341,7 @@ def main():
     print("=" * 60)
     print("skfusion.fusion.Dfmf")
     print("=" * 60)
-    G_old, S_old, err_old_trace = run_skfusion(R12, R13, R23, ranks, max_iter, seed)
+    G_old, S_old, err_old_trace = run_skfusion(skf, R12, R13, R23, ranks, max_iter, seed)
     print(f"  factor dims: t1={G_old['t1'].shape}, t2={G_old['t2'].shape}, t3={G_old['t3'].shape}")
     print(f"  backbone dims: t1-t2={S_old[('t1','t2')][0].shape}, "
           f"t1-t3={S_old[('t1','t3')][0].shape}, t2-t3={S_old[('t2','t3')][0].shape}")
