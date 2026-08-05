@@ -150,11 +150,16 @@ NNDSVD, que cambia la SVD y por tanto el punto de partida. Es una propiedad de c
 acomodan los datos, no del método. Verificarlo es barato: fijar el orden de los bloques
 y repetir la comparación.
 
-## Ingesta desde DataFrames
+## Ingesta desde DataFrames (implementado)
 
-`relation_from_frame`: construir una `Relation` desde un DataFrame de coordenadas
-(entidad, atributo, valor) usando `pd.Categorical` para el mapeo a índices, sin pasar
-nunca por una grilla densa.
+`relations_from_frames` construye todas las relaciones desde tablas de coordenadas
+y resuelve el vocabulario de cada tipo una sola vez (unión ordenada de lo que
+aparece, o una lista fijada), sin pasar nunca por una grilla densa. Las políticas
+hacen ruidosos los desajustes: `on_unknown` para categorías fuera de un
+vocabulario fijado (error con las categorías nombradas, agregarlas al final, o
+descartar esas filas con aviso) y `on_missing` para categorías sin observaciones
+(fila vacía o error). `rows` acepta etiquetas de entidades, y el patrón de
+proyección fija el vocabulario del lado ajustado con `modelo.index`.
 
 El wrapper anterior (`base.py`) hacía la alineación de índices con `reindex` sobre un
 DataFrame denso de $n_i \times n_j$, que es la razón por la que no sirve a escala. Sigue

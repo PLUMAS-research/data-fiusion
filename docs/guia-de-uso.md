@@ -39,29 +39,51 @@ tipos se usan como nombres de archivo al guardar, así que sin `/` ni `\`.
 
 ## Preparar los datos
 
-### De un DataFrame de coordenadas a una relación
+### De DataFrames de coordenadas a relaciones alineadas
 
-El patrón para construir la matriz sin pasar por una grilla densa:
+Los datos reales suelen venir como tablas largas (entidad, entidad, valor), no
+como matrices. `relations_from_frames` construye todas las relaciones de una vez
+y resuelve la alineación: el vocabulario de cada tipo es la unión ordenada de lo
+que aparece en todos los frames (o una lista fijada por el usuario), así que un
+tipo compartido ocupa las mismas posiciones en todas las relaciones sin
+reindexar nada a mano.
 
 ```python
-import pandas as pd
+from datafiusion import relations_from_frames
 
-usuarios = pd.Categorical(viajes_df["id_usuario"])
-zonas = pd.Categorical(viajes_df["zona"])
-matriz = sp.csr_matrix(
-    (viajes_df["n_viajes"].to_numpy(dtype="float64"),
-     (usuarios.codes, zonas.codes)),
-    shape=(len(usuarios.categories), len(zonas.categories)))
-
-Relation(src="usuario", dst="zona", matrix=matriz,
-         row_labels=usuarios.categories.to_numpy(),
-         col_labels=zonas.categories.to_numpy())
+relaciones = relations_from_frames({
+    "viajes": dict(frame=df_viajes, src="id_usuario", dst="zona",
+                   value="n_viajes", src_type="usuario"),
+    "horarios": dict(frame=df_horas, src="usuario", dst="hora"),
+})
+modelo = fuse(relaciones, ranks={"usuario": 30, "zona": 20, "hora": 10})
 ```
 
-Cuando un mismo tipo aparece en varias relaciones, las filas deben referirse a las
-mismas entidades en el mismo orden. Con `row_labels` y `col_labels` puestos, el
-fold-in valida ese orden y una permutación de columnas falla con error en vez de
-puntuar sinsentidos.
+Los pares duplicados se suman (con `value=None` se cuentan ocurrencias; para
+otra estadística, preagregar el frame). Cada spec acepta además los argumentos
+de `Relation` (`family`, `preprocess`, y `rows` como etiquetas de entidades),
+y las etiquetas de filas y columnas quedan puestas, con lo que el fold-in
+valida el orden aguas abajo.
+
+Los desajustes fallan con las categorías nombradas en vez de desalinear en
+silencio. Con un vocabulario fijado (`vocabularies={"zona": [...]}`):
+
+- una categoría del frame fuera del vocabulario lanza `ValueError`;
+  `on_unknown="add"` la agrega al final y `"drop"` descarta esas filas con
+  aviso;
+- una categoría del vocabulario sin observaciones queda como fila vacía;
+  `on_missing="error"` exige el universo completo.
+
+Para proyectar un lote nuevo, el vocabulario del lado ajustado se fija con el
+del modelo, y una categoría desconocida falla claro:
+
+```python
+lote = relations_from_frames(
+    {"viajes": dict(frame=df_nuevos, src="usuario", dst="zona",
+                    value="n_viajes")},
+    vocabularies={"zona": modelo.index["zona"]})
+derivado = modelo.transform(lote, target="usuario")
+```
 
 No usar `DataFusionModel` (el wrapper de `base.py`) con datos grandes: densifica
 para alinear índices. Está en el repo por compatibilidad.

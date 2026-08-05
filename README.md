@@ -56,6 +56,26 @@ escalado aplicado durante el ajuste y la traza de la pérdida. Ese estado es lo 
 permite proyectar entidades nuevas sin que quien llama tenga que recordar en qué
 unidades quedó el ajuste.
 
+### Desde DataFrames de coordenadas
+
+Los datos reales suelen venir como tablas largas, no como matrices.
+`relations_from_frames` construye todas las relaciones de una vez y alinea los
+vocabularios de los tipos compartidos (unión ordenada, o fijados por el usuario),
+con etiquetas puestas y desajustes que fallan nombrando las categorías:
+
+```python
+from datafiusion import relations_from_frames
+
+relaciones = relations_from_frames({
+    "ratings": dict(frame=df_ratings, src="usuario", dst="pelicula", value="nota"),
+    "generos": dict(frame=df_generos, src="pelicula", dst="genero"),
+})
+```
+
+Las políticas `on_unknown` (error, agregar, descartar con aviso) y `on_missing`
+(fila vacía o error) gobiernan las categorías fuera o ausentes de un vocabulario
+fijado. El flujo completo está en `docs/guia-de-uso.md`.
+
 ### Proyectar entidades nuevas
 
 ```python
@@ -302,6 +322,8 @@ medida, y sus fragmentos de código corren tal como aparecen.
 | `FusionModel.loss(relations)` | `model` | Pérdida por la identidad de traza. |
 | `FusionModel.reconstruct_entries(name, rows, cols)` | `model` | Reconstrucción en coordenadas, unidades originales. |
 | `FusionModel.save/load/resume` | `model` | Persistencia y reanudación de un ajuste. |
+| `relations_from_frames(specs, ...)` | `frames` | Relaciones alineadas desde tablas de coordenadas. |
+| `relation_from_frame(frame, src, dst)` | `frames` | Una relación desde una tabla. |
 | `holdout_entries(matrix, fraction)` | `utils` | Retiene entradas para validación. |
 | `fusion_diagram(relations_or_model)` | `diagram` | Esquema de la fusión, orientado a publicación. |
 | `sddmm(pattern, A, B)` | `ops` | Producto de rango bajo muestreado en un patrón disperso. |

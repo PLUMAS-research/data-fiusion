@@ -17,6 +17,7 @@ with it stay reproducible. New work should use `fuse`.
 
 from .base import DataFusionModel
 from .core import dfmf_sparse, reconstruction_error, fold_in_entities, predict_attribute
+from .frames import relation_from_frame, relations_from_frames
 from .model import FusionModel, Relation, fit, fuse
 from .init import init_random, init_nndsvd
 from .ops import product_at, sddmm
@@ -30,6 +31,7 @@ __all__ = [
     "dfmf_sparse", "reconstruction_error", "fold_in_entities", "predict_attribute",
     "DataFusionModel",
     "init_random", "init_nndsvd",
+    "relation_from_frame", "relations_from_frames",
     "sddmm", "product_at", "holdout_entries",
     "ensure_columns", "ensure_index", "labels_to_relation",
     "merge_relations", "normalize_relations",
