@@ -50,6 +50,8 @@ import scipy.sparse as sp
 
 from .core import nonneg_refine
 from .init import init_random, init_nndsvd
+from .ops import product_at
+from .preprocess import apply_chain, invert_chain, validate_names
 
 
 EPS = np.finfo(np.float64).eps
@@ -70,11 +72,49 @@ class Relation:
         Type names. A relation from a type to itself is not allowed; pass
         neighbourhood structure through `graphs` instead.
     matrix : scipy.sparse matrix or ndarray
-        Shape (n_src, n_dst).
+        Shape (n_src, n_dst). A sparse matrix that is not in canonical
+        format is canonicalized with `sum_duplicates()`, which modifies
+        the caller's matrix in place; a copy would be too expensive at
+        the scale this library targets.
     rows : ndarray of int or bool, optional
         Which rows carry an observation. Rows outside the mask contribute
         nothing to the loss, which is what separates "no data" from "a
         measured zero". Without a mask every zero is an observation.
+    entry_weights : ndarray, optional
+        Weight per STORED entry, aligned with `matrix.data` after
+        canonicalization. The loss term becomes
+        sum_stored w_ab (target - r_ab)^2 + background * sum_rest r_ab^2.
+        A weight of zero hides that entry from the fit entirely (its value
+        does not enter the loss, the scaling or the initialization), which
+        is what makes held-out entry validation possible. Weights above
+        one read as importance (implicit-feedback style). Requires a
+        sparse matrix and is not combinable with `rows` yet.
+    background : float, optional
+        Weight of the entries that are NOT stored, whose target is zero.
+        1.0 (the default when `entry_weights` is given) keeps the usual
+        semantics where every zero is an observation; 0.0 ignores
+        unstored entries; values in between read zeros as weak negatives
+        (Hu, Koren and Volinsky). Giving only `background` implies unit
+        weights on the stored entries.
+    preprocess : str or sequence of str, optional
+        Named value transforms applied to the stored entries at fit
+        time, in order, from a closed registry: "log1p", "sqrt",
+        "anscombe" (shifted so 0 maps to 0) and "idf" (column scaling
+        learned from the training data). The transforms are part of the
+        model: their state travels with it, `FusionModel.transform` and
+        `loss` reapply them to incoming raw data, and the caller's
+        matrix is never modified. Requires a sparse matrix.
+    family : {"gaussian", "poisson"}
+        Loss family. "gaussian" is the squared Frobenius loss of the
+        classic path. "poisson" fits the generalized KL divergence, the
+        likelihood for count data; it requires non-negative sparse data
+        and makes that relation's backbone S non-negative. Families can
+        be mixed in one fit (a count relation next to gaussian ones,
+        sharing factors); the balance between families has no natural
+        unit, so their relative `weights` must be validated. Weighting a
+        poisson relation by row or column (for example idf per term) is
+        expressed by scaling the data: a column-weighted KL equals plain
+        KL on the column-scaled matrix.
     row_labels, col_labels : ndarray, optional
         Entity labels. When present they are checked at fold-in time, so a
         column permutation raises instead of silently scoring nonsense.
@@ -84,10 +124,23 @@ class Relation:
     dst: str
     matrix: object
     rows: np.ndarray | None = None
+    entry_weights: np.ndarray | None = None
+    background: float | None = None
+    family: str = "gaussian"
+    preprocess: object = None
     row_labels: np.ndarray | None = None
     col_labels: np.ndarray | None = None
 
     def __post_init__(self):
+        _check_name(self.src, "type")
+        _check_name(self.dst, "type")
+        if self.family not in ("gaussian", "poisson"):
+            raise ValueError(
+                f"unknown family {self.family!r}; supported: 'gaussian', 'poisson'")
+        if self.preprocess is not None:
+            if not sp.issparse(self.matrix):
+                raise ValueError("preprocess requires a sparse matrix")
+            self.preprocess = validate_names(self.preprocess)
         if self.src == self.dst:
             raise ValueError(
                 f"self-relation ({self.src}, {self.dst}) is not supported; "
@@ -107,10 +160,50 @@ class Relation:
                         f"{self.matrix.shape[0]} rows"
                     )
                 rows = np.flatnonzero(rows)
-            self.rows = np.sort(rows)
+            elif rows.size == 0:
+                rows = rows.astype(np.int64)
+            elif not np.issubdtype(rows.dtype, np.integer):
+                raise ValueError(
+                    f"row mask must be boolean or integer, got dtype {rows.dtype}")
+            # La mascara es un conjunto de filas observadas: con duplicados,
+            # la acumulacion por bloques daria un resultado dependiente de
+            # block_rows.
+            self.rows = np.unique(rows)
             if self.rows.size and (self.rows[-1] >= self.matrix.shape[0]
                                    or self.rows[0] < 0):
                 raise ValueError("row mask indexes outside the matrix")
+        if self.entry_weights is not None or self.background is not None:
+            if not sp.issparse(self.matrix):
+                raise ValueError("entry weights require a sparse matrix")
+            if self.rows is not None:
+                raise ValueError(
+                    "entry_weights and rows on the same relation are not "
+                    "supported; hide whole rows by giving their entries "
+                    "weight zero")
+            if self.entry_weights is None:
+                self.entry_weights = np.ones(self.matrix.nnz)
+            else:
+                pesos = np.asarray(self.entry_weights, dtype=np.float64)
+                if pesos.shape != (self.matrix.nnz,):
+                    raise ValueError(
+                        f"entry_weights must align with matrix.data: expected "
+                        f"shape ({self.matrix.nnz},), got {pesos.shape}")
+                if pesos.size and pesos.min() < 0:
+                    raise ValueError("entry weights must be non negative")
+                self.entry_weights = pesos
+            self.background = 1.0 if self.background is None else float(self.background)
+            if self.background < 0:
+                raise ValueError("background weight must be non negative")
+            tope = float(self.entry_weights.max()) if self.entry_weights.size else 0.0
+            if max(tope, self.background) <= 0.0:
+                raise ValueError(
+                    "every entry weight and the background are zero; nothing "
+                    "would enter the loss")
+
+    @property
+    def weighted(self):
+        """Whether this relation carries per-entry weights."""
+        return self.entry_weights is not None
 
     @property
     def shape(self):
@@ -124,9 +217,24 @@ class Relation:
         return self.matrix[self.rows], self.rows
 
 
+def _check_name(nombre, papel):
+    """Reject names that save() could not use as a file name."""
+    invalido = (not isinstance(nombre, str) or not nombre
+                or nombre in (".", "..")
+                or any(c in nombre for c in ("/", "\\", "\x00")))
+    if invalido:
+        raise ValueError(
+            f"{papel} name {nombre!r} is used as a file name by save(), so it "
+            "must be a non-empty str without '/', '\\' or NUL, and distinct "
+            "from '.' and '..'; use '~' or '_' as a separator"
+        )
+
+
 def _as_relations(relations):
     """Accept named relations, or the legacy dict keyed by (src, dst)."""
     if all(isinstance(v, Relation) for v in relations.values()):
+        for nombre in relations:
+            _check_name(nombre, "relation")
         return dict(relations)
     salida = {}
     for clave, valor in relations.items():
@@ -203,7 +311,8 @@ class FusionModel:
             M, filas = relacion.observed()
             G_src = self.G[relacion.src]
             G_src = G_src if filas is None else G_src[filas]
-            err_sq, norm_sq = _squared_error_scaled(M, G_src, S_r, self.G[relacion.dst], s)
+            err_sq, norm_sq = _error_de(relacion, M, G_src, S_r,
+                                        self.G[relacion.dst], s)
             por_relacion[nombre] = err_sq / norm_sq if relative else beta * err_sq
         if per_relation:
             return por_relacion
@@ -213,7 +322,37 @@ class FusionModel:
     def _relations_for_loss(self, relations):
         if relations is None:
             raise ValueError("pass the relations the model was fitted on")
-        return _as_relations(relations)
+        return self._con_preprocesamiento(_as_relations(relations))
+
+    def _con_preprocesamiento(self, relations):
+        """Incoming raw relations with the fit-time transforms reapplied.
+
+        The stateful transforms reuse the state learned at fit time (the
+        stored idf), never one recomputed from the incoming batch: that
+        is the whole point of carrying the preprocessing in the model.
+        """
+        cadenas = self.params.get("preprocess") or {}
+        estados = self.params.get("idf") or {}
+        salida = dict(relations)
+        for nombre, relacion in relations.items():
+            cadena = cadenas.get(nombre)
+            propia = list(relacion.preprocess) if relacion.preprocess else None
+            if propia is not None and propia != list(cadena or []):
+                raise ValueError(
+                    f"relation {nombre!r} declares preprocess {propia} but the "
+                    f"model was fitted with {list(cadena) if cadena else None}; "
+                    "pass the raw matrix and let the model apply its own")
+            if not cadena:
+                continue
+            estado = ({"idf": np.asarray(estados[nombre])}
+                      if nombre in estados else {})
+            matriz, _ = apply_chain(relacion.matrix, tuple(cadena), estado=estado)
+            salida[nombre] = Relation(
+                src=relacion.src, dst=relacion.dst, matrix=matriz,
+                rows=relacion.rows, entry_weights=relacion.entry_weights,
+                background=relacion.background, family=relacion.family,
+                row_labels=relacion.row_labels, col_labels=relacion.col_labels)
+        return salida
 
     # ---------------------------------------------------------------- fold-in
 
@@ -231,42 +370,133 @@ class FusionModel:
         learned backbones, which silently produces the wrong factors
         (cosine 0.44 against the correct fold-in, measured).
 
+        Relation.rows is honoured, with the same semantics as in `fit`:
+        it marks the observed rows of the MATRIX. When the source is
+        `target` it says which new entities carry an observation in that
+        relation, and each entity is solved from the relations it is
+        observed in. When the destination is `target` it restricts the
+        fitted side, and every new entity counts as observed there. New
+        entities with no observation anywhere get a zero factor, are
+        listed under `target` in the derived model's `empty_rows` and
+        trigger a warning. The derived model keeps the parent's
+        `empty_rows` for the other types.
+
         With nonneg=True the solution is refined with multiplicative
         updates from a strictly positive floor. The floor is mandatory: a
         multiplicative update cannot change a sign, so starting from the
         raw ridge yields NaN and starting from a hard clamp freezes the
         support at zero.
         """
+        if self.params.get("family") in ("poisson", "mixed"):
+            raise ValueError(
+                "transform implements the quadratic ridge fold-in, which "
+                "does not apply to a fit with poisson relations; not "
+                "supported yet")
         relations = _as_relations(relations)
         self._validate_fold_in(relations, target)
+        for nombre in relations:
+            cadena = (self.params.get("preprocess") or {}).get(nombre) or ()
+            if "idf" in cadena and self.rel[nombre][1] == target:
+                raise ValueError(
+                    f"relation {nombre!r} was fitted with idf over its "
+                    f"columns; that state cannot apply to new {target!r} "
+                    "entities on the column side")
+        relations = self._con_preprocesamiento(relations)
 
         c = self.ranks[target]
         n_new = _rows_of_target(relations, target)
 
-        Q = np.zeros((c, c))
+        nombres = list(relations)
+        Q_por_relacion = []
+        # Patron por entidad nueva: en que relaciones src-direccion esta
+        # observada. Las relaciones sin mascara y las dst-direccion cuentan
+        # para todas, asi que sin mascaras src no hace falta el patron y el
+        # fold-in masivo no paga arreglos auxiliares de tamano n_new.
+        con_mascara_src = any(
+            relations[n].src == target and relations[n].rows is not None
+            for n in nombres)
+        observada = (np.ones((n_new, len(nombres)), dtype=bool)
+                     if con_mascara_src else None)
         rhs = np.zeros((n_new, c))
-        for nombre, relacion in relations.items():
+        conteo = np.zeros(n_new, dtype=np.int64)
+
+        for r, nombre in enumerate(nombres):
+            relacion = relations[nombre]
             S_r = self.S[nombre]
             s, beta = self.scale[nombre], self.weight[nombre]
-            otro = relacion.dst if relacion.src == target else relacion.src
-            G_otro = self.G[otro]
-            gram = G_otro.T @ G_otro
+            M, filas = relacion.observed()
             if relacion.src == target:
-                Q += beta * (S_r @ gram @ S_r.T)
+                G_otro = self.G[relacion.dst]
+                gram = G_otro.T @ G_otro
+                Q_por_relacion.append(beta * (S_r @ gram @ S_r.T))
+                if filas is not None:
+                    observada[:, r] = False
+                    observada[filas, r] = True
+                por_entidad = M.getnnz(axis=1) if sp.issparse(M) \
+                    else (np.asarray(M) != 0).sum(axis=1)
+                n_obs = M.shape[0]
+                for inicio in range(0, n_obs, block_rows):
+                    bloque = slice(inicio, min(inicio + block_rows, n_obs))
+                    aporte = (beta * s) * ((M[bloque] @ G_otro) @ S_r.T)
+                    if filas is None:
+                        rhs[bloque] += aporte
+                    else:
+                        rhs[filas[bloque]] += aporte
+                if filas is None:
+                    conteo += por_entidad
+                else:
+                    conteo[filas] += por_entidad
             else:
-                Q += beta * (S_r.T @ gram @ S_r)
-            M = relacion.matrix if relacion.src == target else relacion.matrix.T
-            for inicio in range(0, n_new, block_rows):
-                bloque = slice(inicio, min(inicio + block_rows, n_new))
-                producto = M[bloque] @ G_otro
-                rhs[bloque] += (beta * s) * (producto @ (S_r.T if relacion.src == target else S_r))
+                G_otro = self.G[relacion.src]
+                if filas is not None:
+                    G_otro = G_otro[filas]
+                gram = G_otro.T @ G_otro
+                Q_por_relacion.append(beta * (S_r.T @ gram @ S_r))
+                conteo += M.getnnz(axis=0) if sp.issparse(M) \
+                    else (np.asarray(M) != 0).sum(axis=0)
+                # M.T es una vista CSC y scipy multiplica CSC @ denso en
+                # forma nativa, asi que no hace falta materializar la
+                # transpuesta; asociar (G_otro @ S_r) primero deja el
+                # intermedio mas grande en el tamano de rhs.
+                rhs += (beta * s) * (M.T @ (G_otro @ S_r))
 
-        lam = alpha * max(np.trace(Q) / c, EPS)
-        X = np.linalg.solve(Q + lam * np.eye(c), rhs.T).T
-        if not nonneg:
-            G_new = X
+        if observada is None:
+            Q = sum(Q_por_relacion)
+            lam = alpha * max(np.trace(Q) / c, EPS)
+            G_new = np.linalg.solve(Q + lam * np.eye(c), rhs.T).T
+            if nonneg:
+                G_new = nonneg_refine(G_new, Q, rhs, lam, max_iter=max_iter, tol=tol)
         else:
-            G_new = nonneg_refine(X, Q, rhs, lam, max_iter=max_iter, tol=tol)
+            patrones, inverso = np.unique(observada, axis=0, return_inverse=True)
+            inverso = np.asarray(inverso).ravel()
+            G_new = np.zeros((n_new, c))
+            for k, patron in enumerate(patrones):
+                if not patron.any():
+                    continue
+                idx = np.flatnonzero(inverso == k)
+                Q_p = sum(Q_por_relacion[r] for r in np.flatnonzero(patron))
+                lam_p = alpha * max(np.trace(Q_p) / c, EPS)
+                rhs_p = rhs[idx]
+                X_p = np.linalg.solve(Q_p + lam_p * np.eye(c), rhs_p.T).T
+                if nonneg:
+                    X_p = nonneg_refine(X_p, Q_p, rhs_p, lam_p,
+                                        max_iter=max_iter, tol=tol)
+                G_new[idx] = X_p
+
+        sin_datos = np.flatnonzero(conteo == 0)
+        if sin_datos.size:
+            warnings.warn(
+                f"transform: {sin_datos.size} new entities of type {target!r} "
+                "have no observation in any relation. Their factors collapse "
+                "to zero and argmax assigns all of them to component 0. See "
+                "the derived model's empty_rows; drop them or handle them "
+                "explicitly downstream.",
+                stacklevel=2,
+            )
+
+        vacios = {t: v for t, v in self.empty_rows.items() if t != target}
+        if sin_datos.size:
+            vacios[target] = sin_datos
 
         derivado = FusionModel(
             G={**self.G, target: G_new}, S=self.S, rel=self.rel, ranks=self.ranks,
@@ -274,7 +504,8 @@ class FusionModel:
             index={**self.index, target: _labels_of_target(relations, target)},
             history=self.history, rel_error=self.rel_error, n_iter=self.n_iter,
             converged=self.converged, stop_reason=self.stop_reason,
-            dead_columns=self.dead_columns, params={**self.params, "transformed": target},
+            dead_columns=self.dead_columns, empty_rows=vacios,
+            params={**self.params, "transformed": target},
         )
         return derivado
 
@@ -297,6 +528,11 @@ class FusionModel:
             if target not in (src, dst):
                 raise ValueError(
                     f"relation {nombre!r} does not touch target type {target!r}"
+                )
+            if relacion.weighted:
+                raise ValueError(
+                    f"relation {nombre!r} carries entry weights; transform "
+                    "does not support them yet"
                 )
             otro = dst if src == target else src
             eje = 1 if src == target else 0
@@ -388,6 +624,34 @@ class FusionModel:
         v /= v.sum(axis=1, keepdims=True)
         return v
 
+    def reconstruct_entries(self, name, rows, cols, original=False):
+        """Reconstructed values of one relation at the given coordinates.
+
+        The fit-time Frobenius scaling is undone, so the values come in
+        the units the relation entered the fit with (after `preprocess`,
+        if any). With original=True the preprocess chain is inverted as
+        well; note that inverting a reconstruction of non-linear
+        transforms is a readable approximation, not the conditional mean
+        in original units. Cost is O(len(rows) * rank), nothing of
+        relation size is materialized. This is how held-out entries are
+        scored: hide them with `holdout_entries`, fit, then compare
+        `reconstruct_entries` at their coordinates against their values.
+        """
+        if name not in self.rel:
+            raise ValueError(f"unknown relation {name!r}; known: {sorted(self.rel)}")
+        src, dst = self.rel[name]
+        valores = product_at(self.G[src] @ self.S[name], self.G[dst],
+                             np.asarray(rows), np.asarray(cols))
+        valores = valores / self.scale[name]
+        if original:
+            cadena = (self.params.get("preprocess") or {}).get(name)
+            if cadena:
+                estados = self.params.get("idf") or {}
+                estado = ({"idf": np.asarray(estados[name])}
+                          if name in estados else {})
+                valores = invert_chain(valores, cadena, estado, cols)
+        return valores
+
     # ------------------------------------------------------------ persistencia
 
     def save(self, path):
@@ -397,8 +661,26 @@ class FusionModel:
         be memory mapped: np.load(..., mmap_mode='r') on an .npz returns
         ordinary arrays, so a large model could not be opened without
         loading it whole.
+
+        Supervision and mask arrays and graph matrices from `params` go
+        to optional subdirectories; meta.json holds only what json can
+        serialize.
         """
         path = Path(path)
+        # Un directorio reutilizado no debe conservar artefactos de un modelo
+        # anterior: load() los preferiria sobre el null de meta.json y
+        # resume() reaplicaria en silencio una configuracion ajena.
+        for carpeta in ("factors", "backbones", "supervision", "masks",
+                        "graphs", "theta"):
+            ruta = path / carpeta
+            if ruta.is_dir():
+                for archivo in list(ruta.glob("*.npy")) + list(ruta.glob("*.npz")):
+                    archivo.unlink()
+                if carpeta not in ("factors", "backbones"):
+                    try:
+                        ruta.rmdir()
+                    except OSError:
+                        pass
         (path / "factors").mkdir(parents=True, exist_ok=True)
         (path / "backbones").mkdir(parents=True, exist_ok=True)
         for tipo, factor in self.G.items():
@@ -406,6 +688,18 @@ class FusionModel:
         for nombre, backbone in self.S.items():
             np.save(path / "backbones" / f"{nombre}.npy", backbone)
         np.save(path / "history.npy", self.history)
+        for carpeta in ("supervision", "masks", "idf"):
+            arrays = self.params.get(carpeta)
+            if arrays:
+                (path / carpeta).mkdir(exist_ok=True)
+                for clave, arr in arrays.items():
+                    np.save(path / carpeta / f"{clave}.npy", np.asarray(arr))
+        for carpeta in ("graphs", "theta"):
+            matrices = self.params.get(carpeta)
+            if matrices:
+                (path / carpeta).mkdir(exist_ok=True)
+                for clave, W in matrices.items():
+                    sp.save_npz(path / carpeta / f"{clave}.npz", sp.csr_matrix(W))
         meta = {
             "rel": {k: list(v) for k, v in self.rel.items()},
             "ranks": self.ranks, "sizes": self.sizes,
@@ -414,7 +708,7 @@ class FusionModel:
             "converged": self.converged, "stop_reason": self.stop_reason,
             "dead_columns": {k: np.asarray(v).tolist() for k, v in self.dead_columns.items()},
             "empty_rows": {k: np.asarray(v).tolist() for k, v in self.empty_rows.items()},
-            "params": {k: v for k, v in self.params.items() if _jsonable(v)},
+            "params": _params_json(self.params),
             "index": {k: np.asarray(v).tolist() for k, v in self.index.items() if v is not None},
         }
         (path / "meta.json").write_text(json.dumps(meta, indent=2))
@@ -427,6 +721,19 @@ class FusionModel:
         modo = "r" if mmap else None
         G = {p.stem: np.load(p, mmap_mode=modo) for p in sorted((path / "factors").glob("*.npy"))}
         S = {p.stem: np.load(p) for p in sorted((path / "backbones").glob("*.npy"))}
+        params = dict(meta["params"])
+        for carpeta in ("supervision", "masks", "idf"):
+            if (path / carpeta).is_dir():
+                arrays = {p.stem: np.load(p, mmap_mode=modo)
+                          for p in sorted((path / carpeta).glob("*.npy"))}
+                if arrays:
+                    params[carpeta] = arrays
+        for carpeta in ("graphs", "theta"):
+            if (path / carpeta).is_dir():
+                matrices = {p.stem: sp.load_npz(p)
+                            for p in sorted((path / carpeta).glob("*.npz"))}
+                if matrices:
+                    params[carpeta] = matrices
         return cls(
             G=G, S=S, rel={k: tuple(v) for k, v in meta["rel"].items()},
             ranks=meta["ranks"], sizes=meta["sizes"], scale=meta["scale"],
@@ -436,18 +743,31 @@ class FusionModel:
             stop_reason=meta["stop_reason"],
             dead_columns={k: np.asarray(v) for k, v in meta["dead_columns"].items()},
             empty_rows={k: np.asarray(v) for k, v in meta.get("empty_rows", {}).items()},
-            params=meta["params"],
+            params=params,
         )
 
     def resume(self, relations, max_iter, **overrides):
-        """Continue the fit from the current factors, reusing scale and weight.
+        """Continue the fit from the current factors.
 
-        The stored scale and weight are reused rather than recomputed, so
-        resuming on a subset of the data cannot silently change the units.
-        `history` and `n_iter` accumulate.
+        The stored hyperparameters (including masks, graphs and
+        supervision) are reapplied, so resuming with the same relations
+        reproduces the original scaling and configuration without the
+        caller having to repeat them. `history` and `n_iter` accumulate.
+
+        A model derived by `transform` cannot be resumed: its target
+        factor belongs to the folded-in entities, not to the entities the
+        fit was trained on.
         """
+        if "transformed" in self.params:
+            raise ValueError(
+                "this model is a transform() projection over new entities; "
+                "resume the original fitted model instead")
         params = {**self.params, **overrides, "max_iter": max_iter}
-        params.pop("transformed", None)
+        # "family" es informativa (viaja en las relaciones) y el estado de
+        # preprocesamiento se reaprende de las relaciones entregadas.
+        for clave in ("n_runs", "run_losses", "best_run", "family",
+                      "preprocess", "idf"):
+            params.pop(clave, None)
         return fit(relations, ranks=self.ranks, _warm_start=self, **params)
 
 
@@ -459,7 +779,7 @@ def fit(relations, ranks, weights=None, normalize="frobenius", masks=None,
         supervision=None,
         eta=1.0, gauge="column", lambda_S=1e-2, lambda_G=0.0,
         alpha_graph=0.0, graphs=None, theta=None,
-        max_iter=100, tol=1e-5, init="nndsvd", random_state=None,
+        max_iter=100, tol=1e-5, init="nndsvd", random_state=None, n_runs=1,
         block_rows=200_000, verbose=0, callback=None, _warm_start=None):
     """Fit a data fusion model over named relations.
 
@@ -528,6 +848,12 @@ def fit(relations, ranks, weights=None, normalize="frobenius", masks=None,
     max_iter, tol : int, float
         Stop when the relative change in the loss falls below `tol`.
     init : {"nndsvd", "random"}
+    n_runs : int
+        Random restarts. With n_runs > 1, `init` must be "random" and
+        `random_state` must be an int or None; each run draws its seed
+        from np.random.SeedSequence(random_state). The model with the
+        lowest final loss is returned, with "run_losses" and "best_run"
+        recorded in its params.
     block_rows : int
         Row block size for the sparse passes.
     verbose : int
@@ -540,6 +866,36 @@ def fit(relations, ranks, weights=None, normalize="frobenius", masks=None,
     -------
     FusionModel
     """
+    if n_runs > 1:
+        if init != "random":
+            raise ValueError(
+                "n_runs > 1 requires init='random': 'nndsvd' is deterministic, "
+                "so every run would return the same model")
+        if _warm_start is not None:
+            raise ValueError("n_runs > 1 cannot be combined with a warm start")
+        if not (random_state is None or isinstance(random_state, (int, np.integer))):
+            raise ValueError(
+                "n_runs > 1 requires an int or None random_state, not a "
+                "Generator: each run draws its own seed from SeedSequence")
+        semillas = np.random.SeedSequence(random_state).spawn(n_runs)
+        comunes = dict(
+            weights=weights, normalize=normalize, masks=masks,
+            supervision=supervision, eta=eta, gauge=gauge, lambda_S=lambda_S,
+            lambda_G=lambda_G, alpha_graph=alpha_graph, graphs=graphs,
+            theta=theta, max_iter=max_iter, tol=tol, init=init,
+            block_rows=block_rows, verbose=verbose, callback=callback)
+        # Solo se retiene la mejor corrida hasta el momento: mantener las k
+        # a la vez multiplicaria por k la memoria de los factores.
+        modelo, mejor, perdidas = None, 0, []
+        for i in range(n_runs):
+            corrida = fit(relations, ranks, random_state=semillas[i], **comunes)
+            perdidas.append(float(corrida.history[-1]))
+            if modelo is None or perdidas[i] < perdidas[mejor]:
+                modelo, mejor = corrida, i
+        modelo.params.update(random_state=random_state, n_runs=n_runs,
+                             run_losses=perdidas, best_run=mejor)
+        return modelo
+
     relations = _as_relations(relations)
     if masks:
         for nombre, filas in masks.items():
@@ -548,8 +904,47 @@ def fit(relations, ranks, weights=None, normalize="frobenius", masks=None,
             relations[nombre] = Relation(
                 src=relations[nombre].src, dst=relations[nombre].dst,
                 matrix=relations[nombre].matrix, rows=filas,
+                entry_weights=relations[nombre].entry_weights,
+                background=relations[nombre].background,
+                family=relations[nombre].family,
+                preprocess=relations[nombre].preprocess,
                 row_labels=relations[nombre].row_labels,
                 col_labels=relations[nombre].col_labels)
+
+    # El preprocesamiento se aplica una vez aca: todo lo aguas abajo
+    # (escala, inicializacion, perdida) ve la matriz transformada, y el
+    # estado aprendido (idf) queda en el modelo para que transform y loss
+    # lo reapliquen a datos nuevos.
+    prep_nombres = {}
+    prep_estado = {}
+    for nombre in list(relations):
+        relacion = relations[nombre]
+        if relacion.preprocess is None:
+            continue
+        matriz, estado = apply_chain(relacion.matrix, relacion.preprocess)
+        prep_nombres[nombre] = list(relacion.preprocess)
+        if estado:
+            prep_estado[nombre] = estado["idf"]
+        relations[nombre] = Relation(
+            src=relacion.src, dst=relacion.dst, matrix=matriz,
+            rows=relacion.rows, entry_weights=relacion.entry_weights,
+            background=relacion.background, family=relacion.family,
+            row_labels=relacion.row_labels, col_labels=relacion.col_labels)
+    extra_params = dict(preprocess=prep_nombres or None,
+                        idf=prep_estado or None)
+
+    if any(r.family == "poisson" for r in relations.values()):
+        if graphs or theta or _any_nonzero(alpha_graph) or lambda_G > 0.0:
+            raise ValueError(
+                "graphs, theta, alpha_graph and lambda_G are not supported "
+                "with family='poisson' yet")
+        from .poisson import fit_families
+        return fit_families(
+            relations, ranks, weights=weights, supervision=supervision,
+            gauge=gauge, lambda_S=lambda_S, normalize=normalize,
+            max_iter=max_iter, tol=tol, init=init, random_state=random_state,
+            block_rows=block_rows, verbose=verbose, callback=callback,
+            warm_start=_warm_start, extra_params=extra_params)
 
     sizes = _infer_sizes(relations)
     faltantes = set(ranks) - set(sizes)
@@ -616,7 +1011,8 @@ def fit(relations, ranks, weights=None, normalize="frobenius", masks=None,
 
     for iteracion in range(1, max_iter + 1):
         for nombre, relacion in relations.items():
-            S[nombre] = estado.solve_backbone(nombre, G, lambda_S)
+            S[nombre] = estado.solve_backbone(nombre, G, lambda_S,
+                                              S_prev=S.get(nombre))
 
         N, D, energia = estado.accumulate(G, S)
 
@@ -684,22 +1080,25 @@ def fit(relations, ranks, weights=None, normalize="frobenius", masks=None,
     # `transform` and `predict_proba` would assume an optimality that the
     # returned S does not satisfy.
     for nombre in relations:
-        S[nombre] = estado.solve_backbone(nombre, G, lambda_S)
+        S[nombre] = estado.solve_backbone(nombre, G, lambda_S,
+                                          S_prev=S.get(nombre))
 
     rel_error = {}
     for nombre, relacion in relations.items():
         M, filas = relacion.observed()
         G_src = G[relacion.src] if filas is None else G[relacion.src][filas]
-        err_sq, norm_sq = _squared_error_scaled(M, G_src, S[nombre], G[relacion.dst],
-                                                scale[nombre])
+        err_sq, norm_sq = _error_de(relacion, M, G_src, S[nombre],
+                                    G[relacion.dst], scale[nombre])
         rel_error[nombre] = float(np.sqrt(err_sq / max(norm_sq, EPS)))
 
     params = dict(
         weights=weights, normalize=normalize, eta=eta, gauge=gauge,
         supervision={t: m.astype(bool) for t, m in supervision.items()} or None,
+        masks={n: np.asarray(f) for n, f in masks.items()} if masks else None,
+        graphs=dict(graphs) or None, theta=dict(theta) if theta else None,
         lambda_S=lambda_S, lambda_G=lambda_G, alpha_graph=alpha_graph,
         max_iter=max_iter, tol=tol, init=init, random_state=random_state,
-        block_rows=block_rows,
+        block_rows=block_rows, **extra_params,
     )
     return FusionModel(
         G=G, S=S, rel={n: (r.src, r.dst) for n, r in relations.items()},
@@ -730,6 +1129,53 @@ class _FitState:
         self.scale = scale
         self.weight = weight
         self.block_rows = max(1, int(block_rows))
+        # Pesos por entrada, normalizados para que el maximo sea 1: la
+        # magnitud absoluta se pliega en beta, y con pesos acotados por 1
+        # el punto fijo de S queda contraido. Una relacion cuyo peso
+        # normalizado es uniforme e igual al fondo ES la perdida clasica
+        # con beta * tope, y se enruta a la rama sin pesos.
+        self.beta = dict(weight)
+        self.pesos = {}
+        for nombre, relacion in relations.items():
+            if not relacion.weighted:
+                continue
+            w = relacion.entry_weights
+            w0 = relacion.background
+            tope = max(float(w.max()) if w.size else 0.0, w0)
+            if tope <= 0.0:
+                raise ValueError(
+                    f"relation {nombre!r} has every entry weight and the "
+                    "background at zero; nothing would enter the loss")
+            w_norm = w / tope
+            w0_norm = w0 / tope
+            self.beta[nombre] = weight[nombre] * tope
+            delta = w_norm - w0_norm
+            if w0_norm == 1.0 and not np.any(delta):
+                continue
+            M = relacion.matrix
+            objetivo = sp.csr_matrix(
+                (w_norm * (scale[nombre] * M.data), M.indices, M.indptr),
+                shape=M.shape)
+            # La reconstruccion solo se necesita donde delta != 0 (en el
+            # regimen de entradas retenidas eso es una fraccion chica del
+            # patron), asi que el SDDMM corre sobre ese subpatron.
+            mascara = delta != 0.0
+            filas_nnz = np.repeat(np.arange(M.shape[0]), np.diff(M.indptr))
+            filas_sub = filas_nnz[mascara]
+            indptr_sub = np.concatenate(
+                ([0], np.cumsum(np.bincount(filas_sub, minlength=M.shape[0]))))
+            self.pesos[nombre] = dict(
+                w0=w0_norm, tiene_delta=bool(mascara.any()), objetivo=objetivo,
+                delta_sub=delta[mascara], filas_sub=filas_sub,
+                columnas_sub=M.indices[mascara].copy(),
+                indptr_sub=indptr_sub.astype(M.indptr.dtype))
+
+    def _delta_por_reconstruccion(self, info, G_src, S_r, G_dst, shape):
+        """The sparse matrix D.R, evaluated only on the support of delta."""
+        R_sub = product_at(G_src @ S_r, G_dst, info["filas_sub"],
+                           info["columnas_sub"])
+        return sp.csr_matrix((info["delta_sub"] * R_sub, info["columnas_sub"],
+                              info["indptr_sub"]), shape=shape)
 
     def _gram(self, cache, tipo, G, filas):
         clave = (tipo, None if filas is None else filas.tobytes())
@@ -738,18 +1184,41 @@ class _FitState:
             cache[clave] = factor.T @ factor
         return cache[clave]
 
-    def solve_backbone(self, nombre, G, lambda_S):
-        """Closed-form S with Tikhonov, on the observed rows only."""
+    def solve_backbone(self, nombre, G, lambda_S, S_prev=None):
+        """Closed-form S with Tikhonov, on the observed rows only.
+
+        With entry weights there is no closed form: the update is one
+        damped preconditioned step,
+
+            S <- (1 - w0) S + (Gam_i + lam I)^{-1} G_i^T (WT - D.R) G_j (Gam_j + lam I)^{-1}
+
+        whose fixed point satisfies the weighted normal equations, and
+        which reduces EXACTLY to the closed form when the weights are
+        uniform and the background is 1 (then D = 0 and w0 = 1). The
+        weight normalization in __init__ bounds the weights by 1, which
+        keeps this iteration contractive.
+        """
         relacion = self.relations[nombre]
+        info = self.pesos.get(nombre)
         M, filas = relacion.observed()
         G_src = G[relacion.src] if filas is None else G[relacion.src][filas]
         G_dst = G[relacion.dst]
         c_i, c_j = G_src.shape[1], G_dst.shape[1]
         A = G_src.T @ G_src + lambda_S * np.eye(c_i)
         B = G_dst.T @ G_dst + lambda_S * np.eye(c_j)
-        middle = G_src.T @ (M @ G_dst) * self.scale[nombre]
+        if info is None:
+            middle = G_src.T @ (M @ G_dst) * self.scale[nombre]
+        elif S_prev is not None and info["tiene_delta"]:
+            DR = self._delta_por_reconstruccion(info, G_src, S_prev, G_dst,
+                                                M.shape)
+            middle = G_src.T @ ((info["objetivo"] - DR) @ G_dst)
+        else:
+            middle = G_src.T @ (info["objetivo"] @ G_dst)
         X = np.linalg.solve(A, middle)
-        return np.linalg.solve(B.T, X.T).T
+        paso = np.linalg.solve(B.T, X.T).T
+        if info is None or S_prev is None:
+            return paso
+        return (1.0 - info["w0"]) * S_prev + paso
 
     def accumulate(self, G, S):
         """Numerator, denominator and data energy per type, in row blocks.
@@ -764,10 +1233,16 @@ class _FitState:
 
         for nombre, relacion in self.relations.items():
             S_r = S[nombre]
-            s, beta = self.scale[nombre], self.weight[nombre]
+            s, beta = self.scale[nombre], self.beta[nombre]
             M, filas = relacion.observed()
             src, dst = relacion.src, relacion.dst
             G_dst = G[dst]
+
+            info = self.pesos.get(nombre)
+            if info is not None:
+                self._accumulate_weighted(N, D, G, S_r, relacion, info,
+                                          beta, cache)
+                continue
 
             gram_dst = self._gram(cache, dst, G, None)
             B_src = beta * (S_r @ gram_dst @ S_r.T)
@@ -805,6 +1280,51 @@ class _FitState:
 
         energia = {t: float(np.sum(G[t] * D[t])) for t in G}
         return N, D, energia
+
+    def _accumulate_weighted(self, N, D, G, S_r, relacion, info, beta, cache):
+        """Contribution of a relation with entry weights.
+
+        Gradient over 2*beta: w0 G_i B + C - A, with A from the weighted
+        target, C from the delta weights on the reconstruction (the SDDMM)
+        and B the quadratic backbone term. The sign split keeps G_i [B]_+
+        in the denominator at FULL weight, not scaled by w0: that is the
+        positive floor that the naive split loses, and losing it diverges
+        to NaN when the background is zero. With v = (1 - w0) G_i B - C,
+
+            N_i += [A]_+ + G_i [B]_- + [v]_+
+            D_i += [A]_- + G_i [B]_+ + [v]_-
+
+        and symmetrically for the dst side.
+        """
+        src, dst = relacion.src, relacion.dst
+        G_src, G_dst = G[src], G[dst]
+        M = relacion.matrix
+        objetivo = info["objetivo"]
+        w0 = info["w0"]
+
+        gram_src = self._gram(cache, src, G, None)
+        gram_dst = self._gram(cache, dst, G, None)
+        B_i = beta * (S_r @ gram_dst @ S_r.T)
+        B_j = beta * (S_r.T @ gram_src @ S_r)
+        A_i = beta * ((objetivo @ G_dst) @ S_r.T)
+        A_j = beta * ((objetivo.T @ G_src) @ S_r)
+        if info["tiene_delta"]:
+            DR = self._delta_por_reconstruccion(info, G_src, S_r, G_dst,
+                                                M.shape)
+            C_i = beta * ((DR @ G_dst) @ S_r.T)
+            C_j = beta * ((DR.T @ G_src) @ S_r)
+        else:
+            C_i = C_j = 0.0
+        v_i = (1.0 - w0) * (G_src @ B_i) - C_i
+        v_j = (1.0 - w0) * (G_dst @ B_j) - C_j
+
+        for tipo, factor, A_t, B_t, v_t in ((src, G_src, A_i, B_i, v_i),
+                                            (dst, G_dst, A_j, B_j, v_j)):
+            A_pos, A_neg = _split_signs(A_t)
+            B_pos, B_neg = _split_signs(B_t)
+            v_pos, v_neg = _split_signs(v_t)
+            N[tipo] += A_pos + factor @ B_neg + v_pos
+            D[tipo] += A_neg + factor @ B_pos + v_neg
 
 
 def _entities_without_data(relations, sizes):
@@ -934,8 +1454,15 @@ def _infer_sizes(relations):
 def _frobenius_scales(relations):
     escalas = {}
     for nombre, relacion in relations.items():
-        M, _ = relacion.observed()
-        norma = float(np.sqrt(_norm_sq(M)))
+        if relacion.weighted:
+            # Las entradas con peso cero (retenidas) no definen la escala:
+            # su valor no debe influir en el ajuste por ninguna via.
+            datos = relacion.matrix.data[relacion.entry_weights > 0]
+            norma = float(np.sqrt(np.square(
+                datos.astype(np.float64, copy=False)).sum()))
+        else:
+            M, _ = relacion.observed()
+            norma = float(np.sqrt(_norm_sq(M)))
         escalas[nombre] = 1.0 / norma if norma > 0 else 1.0
     return escalas
 
@@ -949,6 +1476,48 @@ def _norm_sq(M):
 def _observed_norm_sq(relacion, escala):
     M, _ = relacion.observed()
     return _norm_sq(M) * escala * escala
+
+
+def _error_de(relacion, M, G_src, S_r, G_dst, escala):
+    """(squared error, squared norm) of one relation, weighted-aware."""
+    if relacion.weighted:
+        return _weighted_squared_error(relacion, G_src, S_r, G_dst, escala)
+    return _squared_error_scaled(M, G_src, S_r, G_dst, escala)
+
+
+def _weighted_squared_error(relacion, G_src, S_r, G_dst, escala):
+    """(weighted squared error, weighted squared norm of the target).
+
+    Expanding sum_stored w (t - R)^2 + w0 sum_rest R^2 leaves ||R||^2 by
+    the trace identity, a cross term through the sparse weighted target,
+    and a quadratic correction that needs R only where w differs from
+    w0. In the held-out regime that support is a small fraction of the
+    pattern, so the expensive gather stays small. Entries with weight
+    zero contribute nothing, so their values cannot move the error.
+    """
+    M = relacion.matrix
+    w = relacion.entry_weights
+    w0 = relacion.background
+    G_src = np.asarray(G_src, dtype=np.float64)
+    G_dst = np.asarray(G_dst, dtype=np.float64)
+    objetivo = escala * M.data
+    ponderado = sp.csr_matrix((w * objetivo, M.indices, M.indptr), shape=M.shape)
+    cross = float(np.sum((G_src.T @ (ponderado @ G_dst)) * S_r))
+    gram_i = G_src.T @ G_src
+    gram_j = G_dst.T @ G_dst
+    total_R2 = float(np.sum((gram_i @ S_r @ gram_j) * S_r))
+    delta = w - w0
+    mascara = delta != 0.0
+    if mascara.any():
+        filas = np.repeat(np.arange(M.shape[0]), np.diff(M.indptr))[mascara]
+        R_sub = product_at(G_src @ S_r, G_dst, filas, M.indices[mascara])
+        correccion = float(np.sum(delta[mascara] * np.square(R_sub)))
+    else:
+        correccion = 0.0
+    err = (w0 * total_R2 + float(np.sum(w * np.square(objetivo)))
+           - 2.0 * cross + correccion)
+    norm = float(np.sum(w * np.square(objetivo)))
+    return max(err, 0.0), max(norm, EPS)
 
 
 def _squared_error_scaled(M, G_src, S_r, G_dst, escala):
@@ -970,8 +1539,8 @@ def _loss_now(relations, G, S, scale, weight, norms_sq, estado):
     for nombre, relacion in relations.items():
         M, filas = relacion.observed()
         G_src = G[relacion.src] if filas is None else G[relacion.src][filas]
-        err_sq, norm_sq = _squared_error_scaled(M, G_src, S[nombre], G[relacion.dst],
-                                                scale[nombre])
+        err_sq, norm_sq = _error_de(relacion, M, G_src, S[nombre],
+                                    G[relacion.dst], scale[nombre])
         total += err_sq / max(norm_sq, EPS)
     return float(total / len(relations))
 
@@ -991,6 +1560,12 @@ def _initialize(relations, sizes, ranks, init, random_state, scale):
             indicador = np.zeros(M.shape[0])
             indicador[relacion.rows] = 1.0
             M = sp.diags(indicador) @ M if sp.issparse(M) else indicador[:, None] * M
+        elif relacion.weighted and np.any(relacion.entry_weights == 0.0):
+            # Las entradas con peso cero se ocultan tambien de la
+            # inicializacion, o su valor se filtraria al punto de partida.
+            M = sp.csr_matrix(
+                (M.data * (relacion.entry_weights != 0.0), M.indices, M.indptr),
+                shape=M.shape)
         R.setdefault((relacion.src, relacion.dst), []).append(M)
     if init == "random":
         return init_random(R, sizes, ranks, random_state=random_state)
@@ -1066,4 +1641,39 @@ def _finish_combine(acumulado, combine, n_views):
 
 
 def _jsonable(v):
-    return isinstance(v, (str, int, float, bool, type(None), list, dict))
+    """Whether json.dumps can serialize v. Arrays and sparse matrices cannot."""
+    if isinstance(v, (str, int, float, bool, type(None))):
+        return True
+    if isinstance(v, dict):
+        return all(isinstance(k, str) and _jsonable(x) for k, x in v.items())
+    if isinstance(v, (list, tuple)):
+        return all(_jsonable(x) for x in v)
+    return False
+
+
+def _native(v):
+    """Numpy scalars as native Python scalars, recursively.
+
+    np.float32 and np.int64 are not subclasses of float and int, so
+    without this a params entry like weights={'r': np.float32(30)} would
+    be dropped from meta.json in silence and resume after load would
+    revert the hyperparameter to its default.
+    """
+    if isinstance(v, np.generic):
+        return v.item()
+    if isinstance(v, dict):
+        return {k: _native(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_native(x) for x in v]
+    return v
+
+
+def _params_json(params):
+    """Params as meta.json stores them: numpy scalars converted, the rest
+    filtered to what json accepts (arrays and sparse go to subdirectories)."""
+    salida = {}
+    for clave, valor in params.items():
+        valor = _native(valor)
+        if _jsonable(valor):
+            salida[clave] = valor
+    return salida

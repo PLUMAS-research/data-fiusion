@@ -226,6 +226,73 @@ def test_transform_rechaza_forma_incompatible():
         modelo.transform(rota, target="t1")
 
 
+def test_transform_con_mascara_excluye_y_reporta():
+    """Una entidad nueva fuera de la mascara no puede salir del fold-in.
+
+    Su factor queda en cero, queda registrada en empty_rows y hay aviso.
+    Las observadas tienen que dar lo mismo que transformar la submatriz
+    sin mascara: el solve por patrones no puede mover el resultado.
+    """
+    base = instancia()
+    modelo = fit(base, RANKS, max_iter=30, random_state=0)
+    nuevas = _relaciones_nuevas(base, n_new=10, semilla=6)
+    observadas = np.setdiff1d(np.arange(10), [3])
+    con_mascara = {"r01": Relation(src="t1", dst="t2",
+                                   matrix=nuevas["r01"].matrix, rows=observadas)}
+    with pytest.warns(UserWarning, match="transform"):
+        derivado = modelo.transform(con_mascara, target="t1")
+    G = derivado.G["t1"]
+    assert np.array_equal(G[3], np.zeros(RANKS["t1"]))
+    assert np.array_equal(derivado.empty_rows["t1"], np.array([3]))
+
+    sub = {"r01": Relation(src="t1", dst="t2",
+                           matrix=nuevas["r01"].matrix[observadas])}
+    esperado = modelo.transform(sub, target="t1")
+    assert np.abs(G[observadas] - esperado.G["t1"]).max() < 1e-12
+
+
+def test_transform_mascara_en_una_relacion_usa_la_otra():
+    """Una entidad excluida de una relacion se resuelve solo con la otra.
+
+    Se compara con nonneg=False porque el solve es exacto; el refinado
+    multiplicativo acopla filas distintas a traves de su criterio de
+    parada global.
+    """
+    base = instancia()
+    modelo = fit(base, RANKS, max_iter=30, random_state=0)
+    nuevas = _relaciones_nuevas(base, n_new=12, semilla=7)
+    excluidas = np.array([2, 5])
+    observadas = np.setdiff1d(np.arange(12), excluidas)
+    con_mascara = {
+        "r01": Relation(src="t1", dst="t2", matrix=nuevas["r01"].matrix,
+                        rows=observadas),
+        "r02": nuevas["r02"],
+    }
+    derivado = modelo.transform(con_mascara, target="t1", nonneg=False)
+    solo_otra = modelo.transform({"r02": nuevas["r02"]}, target="t1", nonneg=False)
+    assert np.abs(derivado.G["t1"][excluidas]
+                  - solo_otra.G["t1"][excluidas]).max() < 1e-12
+
+
+def test_transform_propaga_empty_rows_del_padre():
+    base = instancia()
+    vacias_t2 = [4, 9]
+    ajustadas = {}
+    for nombre, r in base.items():
+        M = r.matrix.toarray()
+        if r.src == "t2":
+            M[vacias_t2] = 0.0
+        if r.dst == "t2":
+            M[:, vacias_t2] = 0.0
+        ajustadas[nombre] = Relation(src=r.src, dst=r.dst, matrix=sp.csr_matrix(M))
+    with pytest.warns(UserWarning, match="no observation"):
+        modelo = fit(ajustadas, RANKS, max_iter=20, tol=None, random_state=0)
+    derivado = modelo.transform(_relaciones_nuevas(base, n_new=8, semilla=9),
+                                target="t1")
+    assert np.array_equal(derivado.empty_rows["t2"], np.array(vacias_t2))
+    assert "t1" not in derivado.empty_rows
+
+
 def test_transform_compone_con_predict_proba():
     base = instancia()
     modelo = fit(base, RANKS, max_iter=30, random_state=0)
@@ -381,6 +448,20 @@ def test_rechaza_rank_mayor_que_entidades():
     R = {("t1", "t2"): [sp.random(10, 20, density=0.3, format="csr", random_state=0)]}
     with pytest.raises(ValueError, match="exceeds"):
         fit(R, {"t1": 40, "t2": 3}, max_iter=5)
+
+
+def test_rechaza_nombres_de_relacion_invalidos():
+    M = sp.random(30, 20, density=0.3, format="csr", random_state=0)
+    for nombre in ("a/b", "", ".."):
+        with pytest.raises(ValueError, match="save"):
+            fit({nombre: Relation(src="t1", dst="t2", matrix=M)},
+                {"t1": 4, "t2": 3}, max_iter=2)
+
+
+def test_rechaza_nombre_de_tipo_invalido():
+    with pytest.raises(ValueError, match="save"):
+        Relation(src="a/b", dst="t2",
+                 matrix=sp.random(5, 4, density=0.5, format="csr", random_state=0))
 
 
 def test_desempaqueta_como_la_ruta_vieja():
@@ -543,3 +624,86 @@ def test_mascara_de_filas_y_supervision_conviven():
     assert (G[etiquetadas, 2:] == 0).all(), "la supervision no se respeto"
     assert (G[etiquetadas, :2] > 0).any(), "las componentes permitidas quedaron vacias"
     assert modelo.history[-1] < modelo.history[0]
+
+
+# ----------------------------------------------------------------- multistart
+
+
+def test_n_runs_elige_la_mejor_corrida():
+    """El modelo devuelto es el de menor perdida entre las corridas.
+
+    Las semillas salen de np.random.SeedSequence(random_state).spawn, asi
+    que las corridas se pueden reproducir una a una.
+    """
+    base = instancia()
+    modelo = fit(base, RANKS, n_runs=3, init="random", random_state=0,
+                 max_iter=15, tol=None)
+    semillas = np.random.SeedSequence(0).spawn(3)
+    perdidas = [fit(base, RANKS, init="random", random_state=s,
+                    max_iter=15, tol=None).history[-1] for s in semillas]
+    assert modelo.history[-1] == min(perdidas)
+    assert modelo.params["n_runs"] == 3
+    assert modelo.params["best_run"] == int(np.argmin(perdidas))
+    assert np.allclose(modelo.params["run_losses"], perdidas)
+    assert modelo.params["random_state"] == 0
+
+
+def test_n_runs_exige_init_random():
+    with pytest.raises(ValueError, match="init='random'"):
+        fit(instancia(), RANKS, n_runs=2, init="nndsvd", max_iter=2)
+
+
+def test_n_runs_rechaza_generator():
+    with pytest.raises(ValueError, match="Generator"):
+        fit(instancia(), RANKS, n_runs=2, init="random",
+            random_state=np.random.default_rng(0), max_iter=2)
+
+
+def test_resume_de_un_multistart_corre():
+    base = instancia()
+    modelo = fit(base, RANKS, n_runs=2, init="random", random_state=1,
+                 max_iter=10, tol=None)
+    reanudado = modelo.resume(base, max_iter=5)
+    assert reanudado.n_iter == modelo.n_iter + 5
+    assert "n_runs" not in reanudado.params
+
+
+def test_mascara_con_duplicados_se_deduplica():
+    """The mask is a set of observed rows; with duplicates kept, the block
+    accumulation in transform would depend on block_rows."""
+    M = sp.csr_matrix(np.eye(4))
+    r = Relation(src="a", dst="b", matrix=M, rows=[2, 0, 2, 1])
+    assert np.array_equal(r.rows, [0, 1, 2])
+
+
+def test_mascara_flotante_no_vacia_se_rechaza():
+    M = sp.csr_matrix(np.eye(4))
+    with pytest.raises(ValueError, match="boolean or integer"):
+        Relation(src="a", dst="b", matrix=M, rows=[0.5, 1.0])
+
+
+def test_mascara_entera_vacia_equivale_a_booleana_toda_falsa():
+    """rows=[] used to crash in transform: np.asarray([]) is float64."""
+    base = instancia()
+    modelo = fit(base, RANKS, max_iter=20, tol=None, random_state=0)
+    M_nueva = base["r01"].matrix[:10]
+    d = {}
+    for clave, mascara in [("lista", []), ("bool", np.zeros(10, dtype=bool))]:
+        nuevas = {"r01": Relation(src="t1", dst="t2", matrix=M_nueva,
+                                  rows=mascara)}
+        with pytest.warns(UserWarning, match="no observation"):
+            d[clave] = modelo.transform(nuevas, target="t1")
+        assert (d[clave].factor("t1") == 0).all()
+        assert np.array_equal(d[clave].empty_rows["t1"], np.arange(10))
+    assert np.array_equal(d["lista"].factor("t1"), d["bool"].factor("t1"))
+
+
+def test_resume_de_un_transformado_se_rechaza():
+    """The derived factor belongs to folded-in entities; resuming from it
+    would warm-start the fit with factors of different entities."""
+    base = instancia()
+    modelo = fit(base, RANKS, max_iter=15, tol=None, random_state=0)
+    nuevas = {"r01": Relation(src="t1", dst="t2", matrix=base["r01"].matrix[:10])}
+    derivado = modelo.transform(nuevas, target="t1")
+    with pytest.raises(ValueError, match="transform"):
+        derivado.resume(base, max_iter=2)

@@ -71,10 +71,10 @@ def labels_to_relation(labels, classes=None, fill=0.0):
     Rows where `labels` is NaN are written as `fill`. `fill=0.0` reads as
     "no class membership", which biases the factorization away from any
     class for unlabeled rows. `fill=1.0/n_classes` reads as a uniform prior.
-    Neither is the right thing semantically (proper unlabeled handling
-    needs per-relation observation masks, the next iteration), but for
-    sparse labeling the bias is often dominated by signal from other
-    relations.
+    Neither is the right thing semantically. For proper unlabeled handling,
+    use `fit` with a row observation mask (`Relation.rows` or the `masks`
+    argument) so unlabeled rows drop out of the loss. Still, for sparse
+    labeling the bias is often dominated by signal from other relations.
 
     Parameters
     ----------
@@ -97,6 +97,29 @@ def labels_to_relation(labels, classes=None, fill=0.0):
     if unlabeled.any() and fill != 0.0:
         Y.loc[unlabeled] = fill
     return Y
+
+
+def holdout_entries(matrix, fraction=0.1, random_state=None):
+    """Pick a random subset of stored entries to hold out of a fit.
+
+    Returns ``(weights, (rows, cols))``: `weights` is aligned with
+    ``matrix.data`` and is 1.0 everywhere except 0.0 at the held-out
+    entries, ready for ``Relation(entry_weights=weights)``; the
+    coordinate pair locates the held-out entries so they can be scored
+    with ``FusionModel.reconstruct_entries`` after the fit.
+
+    The matrix is canonicalized in place (duplicates summed) so the
+    weights stay aligned with its data.
+    """
+    M = matrix.tocsr()
+    M.sum_duplicates()
+    rng = np.random.default_rng(random_state)
+    n_out = int(round(fraction * M.nnz))
+    elegidos = rng.choice(M.nnz, size=n_out, replace=False)
+    pesos = np.ones(M.nnz)
+    pesos[elegidos] = 0.0
+    filas = np.repeat(np.arange(M.shape[0]), np.diff(M.indptr))[elegidos]
+    return pesos, (filas, M.indices[elegidos].copy())
 
 
 def ensure_columns(df, columns, fill_value=np.nan):

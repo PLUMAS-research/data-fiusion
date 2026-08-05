@@ -9,18 +9,18 @@ calibrated against the data, a loss trace and a stopping tolerance. Its
 loss never materializes a matrix of relation size, so it is the one to
 use on relations that do not fit densely.
 
-`dfmf_sparse` is the legacy one, frozen. The notebooks in notebooks/ and
-the results reported in report/ were produced with it, so its numerical
-behaviour is pinned by tests/test_golden.py and does not change. New work
-should use `fit`.
+`dfmf_sparse` is the legacy one, frozen. Its numerical behaviour is
+pinned by tests/test_golden.py and does not change, so results produced
+with it stay reproducible. New work should use `fit`.
 """
 
 from .base import DataFusionModel
 from .core import dfmf_sparse, reconstruction_error, fold_in_entities, predict_attribute
 from .model import FusionModel, Relation, fit
 from .init import init_random, init_nndsvd
+from .ops import product_at, sddmm
 from .utils import (
-    ensure_columns, ensure_index, labels_to_relation,
+    ensure_columns, ensure_index, holdout_entries, labels_to_relation,
     merge_relations, normalize_relations,
 )
 
@@ -29,6 +29,7 @@ __all__ = [
     "dfmf_sparse", "reconstruction_error", "fold_in_entities", "predict_attribute",
     "DataFusionModel",
     "init_random", "init_nndsvd",
+    "sddmm", "product_at", "holdout_entries",
     "ensure_columns", "ensure_index", "labels_to_relation",
     "merge_relations", "normalize_relations",
 ]
