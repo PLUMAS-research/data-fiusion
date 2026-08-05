@@ -26,7 +26,7 @@ dependencies = [
 Repository = "https://github.com/PLUMAS-research/data-fiusion"
 
 [project.optional-dependencies]
-viz = ["matplotlib>=3.5", "seaborn>=0.12"]
+viz = ["matplotlib>=3.5"]
 
 [dependency-groups]
 dev = ["pytest>=7.0"]
