@@ -254,7 +254,21 @@ ajuste.
 - El costo por iteración es O(nnz por rango) y la pérdida nunca materializa una
   matriz del tamaño de la relación. Contra la implementación de referencia
   densificada: 2 a 5 veces menos tiempo y 7 a 10 veces menos memoria.
+- La precisión de trabajo sigue a los datos: con todas las matrices en `float32`,
+  los factores y buffers quedan en `float32` (la mitad de memoria y 1.35x medido
+  en una relación de 200k por 5k con 5M de entradas), mientras la pérdida y los
+  solves de rango se acumulan en `float64`. La pérdida carga un ruido relativo
+  del orden de $4 \times 10^{-5}$, así que `tol` bajo `1e-4` queda debajo del
+  piso y el ajuste lo advierte. La conversión a `float32` se hace aguas arriba
+  (`M.astype(np.float32)` al construir la relación); convertir adentro
+  duplicaría el nnz en memoria.
 - `block_rows` acota la memoria de las pasadas por bloques (default 200 mil filas).
+- `fuse(..., device="gpu")` corre el loop en una GPU CUDA vía CuPy y devuelve
+  el modelo en numpy, así que nada aguas abajo cambia. Medido en una RTX 2080
+  contra un hilo de CPU, en `float32`: 5.8x con 5M de entradas y 7.6x con 50M
+  (`examples/gpu/comparacion.py`). Requiere el extra `gpu` (instalación en el
+  README); sin GPU no hay nada que instalar, el default `device="cpu"` nunca
+  importa cupy. Sin soporte GPU todavía: relaciones Poisson y pesos por entrada.
 - Los pesos por entrada cuestan 1.9x con 10% de entradas retenidas y 5.2x en el
   régimen implícito denso (medido; `docs/oportunidades.md` anota las vías de
   optimización).

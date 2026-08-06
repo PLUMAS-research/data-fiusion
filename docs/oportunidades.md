@@ -128,15 +128,79 @@ pasarle S o incorporar la validación al loop.
 cómputo. El techo real de paralelizarlos que midió el análisis es 3.1x y 2.1x según la
 operación, no el 15x que sugerían las estimaciones ingenuas.
 
-**Pasadas redundantes**: la estructura actual hace tres pasadas sparse por matriz donde
-bastan dos, ordenando el cálculo para que `middle` salga del primer producto en vez de
-recalcularse.
+**Pasadas redundantes (implementado)**: la estructura anterior hacía cuatro pasadas
+sparse por matriz y por iteración (solve de $S$, acumulación directa, acumulación
+transpuesta y pérdida) donde bastan dos. El producto $P = M G_{dst}$ se calcula ahora
+una sola vez por iteración, dentro de la pérdida con los factores recién actualizados,
+y queda cacheado en `_FitState.productos`; el solve de $S$ y la acumulación de la
+iteración siguiente lo reutilizan, porque ven los mismos factores. Quedan la pasada de
+la pérdida y la transpuesta. Medido sobre una relación de 200k por 5k con 5M de
+entradas (8 iteraciones, rangos 20 y 15): 1.37x sin máscara y 1.29x con una relación
+adicional enmascarada, con trayectoria bit a bit idéntica. El costo es mantener un
+buffer $(n_{obs}, c_{dst})$ por relación entre iteraciones. Las relaciones con pesos
+por entrada no usan el caché; la de pesos uniformes, que se enruta a la rama clásica,
+lo invalida en cada pérdida para no leer un producto obsoleto.
 
 **Actualización en sitio por bloques**: acumular numerador y denominador completos por
 tipo cuesta tres veces el tamaño de $G$. Calcular por bloques de filas y escribir en
 sitio baja el pico. El análisis midió 11.28 GB a 6.71 GB en un caso de 5 millones de
 filas. La complicación es que solo es equivalente cuando el tipo aparece en un solo lado
 de sus relaciones, así que hay que detectar el caso y avisar cuando no se cumple.
+
+## GPU (implementado)
+
+`fuse(..., device="gpu")` corre el loop de ajuste en una GPU CUDA vía CuPy:
+las relaciones se suben una vez, las pasadas sparse van por cuSPARSE (la
+transpuesta con `spmm(transa=True)`, que dispersa sobre la salida chica en vez
+de recolectar del factor grande y evita la copia transpuesta en VRAM), el
+álgebra de factores por cuBLAS, y el modelo vuelve en numpy. Medido de punta a
+punta contra un hilo de CPU en `float32`, 10 iteraciones
+(`examples/gpu/comparacion.py`): 5.8x en 200k por 5k con 5M de entradas y 7.6x
+en 2M por 10k con 50M, con desvío de la pérdida bajo $10^{-6}$ y 1.25 GB de
+VRAM en la instancia grande. Sin soporte GPU todavía: relaciones Poisson y
+pesos por entrada (se rechazan con error).
+
+Queda margen medido pero no explotado: la suma de los kernels de una iteración
+proyecta 38x en la instancia grande, y el ajuste completo da 7.6x, así que
+cerca de dos tercios del tiempo GPU se va en costos por iteración fuera de los
+kernels (lanzamientos, sincronizaciones por `float()`, solves chicos en
+cuSOLVER). Reducir sincronizaciones (acumular la pérdida en el dispositivo y
+bajarla cada k iteraciones) es el siguiente paso si esa brecha importa.
+
+El spike de primitivas que motivó la integración quedó reproducible en
+`examples/gpu/primitivas.py`; sobre la misma tarjeta:
+
+- SpMM directo $M G_{dst}$: 17x a 21x. GEMMs de factores: 18x a 60x. Update
+  elementwise: 17x a 41x. Instancias: 200k por 5k con 5M de entradas, y 2M por
+  10k con 50M de entradas, rangos 20 y 15.
+- La pasada transpuesta es el punto delicado. Con la transpuesta materializada
+  como CSR queda en 4x, porque recolecta del factor grande entrada por entrada.
+  `cupyx.cusparse.spmm(M, G, transa=True)` sobre el CSR original la baja de
+  336 a 28 ms en la instancia grande (dispersa sobre la salida chica, que cabe
+  en cache) y además evita la copia transpuesta en VRAM. Exige el factor en
+  orden F.
+- Compuesto de primitivas por iteración, usando `transa`: 18x en la instancia
+  chica y 38x en la grande. Contra el techo medido de paralelizar en CPU (3.1x),
+  la GPU queda un orden de magnitud arriba.
+- Transferencia host-device del CSR y factores: 240 ms para 50M de entradas,
+  una vez por ajuste; se amortiza en las iteraciones.
+- VRAM: 1.25 GB de pool para la instancia de 50M de entradas con sus factores y
+  productos. Extrapolando (no medido), la tarjeta de 8 GB acomoda del orden de
+  150M de entradas sin copia transpuesta.
+- Numérica: diferencia relativa de $3 \times 10^{-7}$ en el SpMM directo y
+  $4 \times 10^{-6}$ en `transa` (los atómicos cambian el orden de suma), dentro
+  del régimen `float32` documentado.
+
+La integración quedó como conversión en el borde de `fuse` (vistas de las
+relaciones residentes en GPU, `gpu.py`) más despacho por protocolo: casi todo
+el loop llama `np.*`, que CuPy resuelve vía `__array_function__`; los puntos
+que no despachan (creación de arreglos, `np.eye`) pasan por el helper `_xp`.
+La pérdida se acumula en `float64` como en CPU. En GPU de consumo el `float64`
+corre a 1/32 del `float32`, así que el soporte `float32` es el camino
+recomendado. Nota de instalación: con CUDA 13 los wheels NVIDIA sin sufijo
+instalan en `nvidia/cu13/lib`, que `cuda-pathfinder` 1.6 no revisa; `gpu.py`
+apunta `CUDA_PATH` ahí antes de importar `cupy`, y el extra `gpu` del
+`pyproject` resuelve a `cupy-cuda13x[ctk]`.
 
 ## La diferencia de 1.6% entre las dos rutas
 
@@ -165,16 +229,22 @@ El wrapper anterior (`base.py`) hacía la alineación de índices con `reindex` 
 DataFrame denso de $n_i \times n_j$, que es la razón por la que no sirve a escala. Sigue
 en el repo por compatibilidad, pero no debería usarse para datos grandes.
 
-## Precisión de los factores
+## Precisión de los factores (implementado)
 
-`float32` bajaría el pico de memoria de los factores a la mitad. El análisis midió que
-con factores en `float32` el producto que calcula `middle` da un error relativo de
-$4 \times 10^{-5}$, suficiente para que la pérdida salga negativa en régimen convergido
-y para dejar una tolerancia de $10^{-4}$ en el piso del ruido.
+La precisión de trabajo sigue a los datos: cuando todas las relaciones llegan en
+`float32`, `fuse` mantiene factores, backbones y buffers de iteración en `float32`,
+acumula la pérdida en `float64` y resuelve los sistemas de tamaño rango en `float64`
+(el resultado vuelve a la precisión de trabajo). Cualquier mezcla de dtypes ajusta en
+`float64`, y la conversión sigue siendo responsabilidad del llamador: convertir dentro
+de `fuse` duplicaría el nnz en memoria.
 
-Viable, pero exige acumular la pérdida en `float64` y subir el piso de la tolerancia.
-La conversión debe hacerse aguas arriba: convertir dentro de `fuse` duplicaría el nnz en
-memoria, que es justamente lo que se quiere evitar.
+Medido sobre la relación de 200k por 5k con 5M de entradas: 1.35x sobre la ruta ya
+cacheada (1.80x acumulado con las pasadas redundantes eliminadas), la mitad de memoria
+en factores, y un desvío relativo de la pérdida de $1.9 \times 10^{-7}$ en esa escala.
+La cota medida por el análisis en régimen convergido sigue vigente:
+$4 \times 10^{-5}$ en el producto de `middle`, que es el piso que justifica advertir
+cuando `tol` baja de $10^{-4}$ con datos `float32`. La ruta Poisson y la de pesos por
+entrada no fueron adaptadas ni medidas en `float32`.
 
 ## Selección de rango
 
@@ -264,8 +334,9 @@ agrupan. Costo: tocar `core.py`, que hoy comparte esta función entre las dos ru
 ## Integración continua
 
 Un workflow de GitHub Actions que corra `pytest` en cada push. La suite corre sin
-descargas ni credenciales, y la comparación con scikit-fusion se salta sola si no está
-instalado, así que no hay bloqueo técnico. Pendiente por decisión del mantenedor.
+descargas ni credenciales, la comparación con scikit-fusion usa trazas guardadas
+en el repo (sin dependencia) y los tests de GPU se saltan solos sin tarjeta, así
+que no hay bloqueo técnico. Pendiente por decisión del mantenedor.
 
 ## Lo que se probó y no funcionó
 

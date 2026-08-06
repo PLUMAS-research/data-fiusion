@@ -27,9 +27,10 @@ Repository = "https://github.com/PLUMAS-research/data-fiusion"
 
 [project.optional-dependencies]
 viz = ["matplotlib>=3.5"]
+gpu = ["cupy-cuda13x[ctk]>=14"]
 
 [dependency-groups]
-dev = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "scikit-learn>=1.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -54,7 +54,9 @@ from .ops import product_at
 from .preprocess import apply_chain, invert_chain, validate_names
 
 
-EPS = np.finfo(np.float64).eps
+# Python float en vez de escalar numpy: bajo NEP 50 un escalar np.float64
+# subiria a float64 cualquier buffer float32 que toque.
+EPS = float(np.finfo(np.float64).eps)
 FLOOR = 1e-12
 
 
@@ -780,8 +782,17 @@ def fuse(relations, ranks, weights=None, normalize="frobenius", masks=None,
         eta=1.0, gauge="column", lambda_S=1e-2, lambda_G=0.0,
         alpha_graph=0.0, graphs=None, theta=None,
         max_iter=100, tol=1e-5, init="nndsvd", random_state=None, n_runs=1,
-        block_rows=200_000, verbose=0, callback=None, _warm_start=None):
+        block_rows=200_000, device="cpu", verbose=0, callback=None,
+        _warm_start=None):
     """Fit a data fusion model over named relations.
+
+    The working precision follows the data: when every relation matrix is
+    float32, the factors, backbones and iteration buffers are float32
+    (half the memory and half the memory traffic of the sparse passes),
+    while the loss and the rank-size solves still accumulate in float64.
+    The loss then carries relative noise around 4e-5, so a `tol` below
+    1e-4 sits under that floor and a warning says so. Any other dtype mix
+    fits in float64.
 
     Parameters
     ----------
@@ -856,6 +867,16 @@ def fuse(relations, ranks, weights=None, normalize="frobenius", masks=None,
         recorded in its params.
     block_rows : int
         Row block size for the sparse passes.
+    device : {"cpu", "gpu"}
+        Where the iteration loop runs. "gpu" uploads the relations once,
+        runs the sparse passes through cuSPARSE and the factor algebra
+        through cuBLAS (CuPy), and returns the fitted model in numpy, so
+        nothing downstream changes. It needs the optional dependency
+        `data-fiusion[gpu]` and a CUDA GPU; float32 data is the sensible
+        choice on consumer GPUs, whose float64 units run at a fraction
+        of the float32 rate. Not supported on GPU yet: poisson relations
+        and entry weights. Under device="gpu" the callback receives
+        device-resident factors.
     verbose : int
         Print the loss every `verbose` iterations.
     callback : callable, optional
@@ -866,6 +887,8 @@ def fuse(relations, ranks, weights=None, normalize="frobenius", masks=None,
     -------
     FusionModel
     """
+    if device not in ("cpu", "gpu"):
+        raise ValueError(f"unknown device {device!r}; supported: 'cpu', 'gpu'")
     if n_runs > 1:
         if init != "random":
             raise ValueError(
@@ -883,7 +906,8 @@ def fuse(relations, ranks, weights=None, normalize="frobenius", masks=None,
             supervision=supervision, eta=eta, gauge=gauge, lambda_S=lambda_S,
             lambda_G=lambda_G, alpha_graph=alpha_graph, graphs=graphs,
             theta=theta, max_iter=max_iter, tol=tol, init=init,
-            block_rows=block_rows, verbose=verbose, callback=callback)
+            block_rows=block_rows, device=device, verbose=verbose,
+            callback=callback)
         # Solo se retiene la mejor corrida hasta el momento: mantener las k
         # a la vez multiplicaria por k la memoria de los factores.
         modelo, mejor, perdidas = None, 0, []
@@ -938,6 +962,10 @@ def fuse(relations, ranks, weights=None, normalize="frobenius", masks=None,
             raise ValueError(
                 "graphs, theta, alpha_graph and lambda_G are not supported "
                 "with family='poisson' yet")
+        if device == "gpu":
+            raise ValueError(
+                "family='poisson' is not supported with device='gpu' yet; "
+                "fit it on device='cpu'")
         from .poisson import fit_families
         return fit_families(
             relations, ranks, weights=weights, supervision=supervision,
@@ -984,15 +1012,27 @@ def fuse(relations, ranks, weights=None, normalize="frobenius", masks=None,
         else {n: 1.0 for n in relations}
     weight = {n: float((weights or {}).get(n, 1.0)) for n in relations}
 
+    dtype = (np.float32
+             if all(r.matrix.dtype == np.float32 for r in relations.values())
+             else np.float64)
+    if dtype == np.float32 and tol is not None and tol < 1e-4:
+        warnings.warn(
+            "with float32 data the loss carries relative noise around 4e-5, "
+            "so a tol below 1e-4 sits under that floor. Pass tol>=1e-4, or "
+            "None to disable the convergence check.",
+            stacklevel=2)
+
     if _warm_start is not None:
-        G = {t: np.array(f, dtype=np.float64) for t, f in _warm_start.G.items()}
+        G = {t: np.array(f, dtype=dtype) for t, f in _warm_start.G.items()}
         historia_previa = list(np.asarray(_warm_start.history).ravel())
         iteraciones_previas = _warm_start.n_iter
     else:
         G = _initialize(relations, sizes, ranks, init, random_state, scale)
+        G = {t: np.asarray(f, dtype=dtype) for t, f in G.items()}
         historia_previa, iteraciones_previas = [], 0
 
     supervision = _validate_supervision(supervision, sizes, ranks)
+    supervision = {t: m.astype(dtype, copy=False) for t, m in supervision.items()}
     for tipo, permitido in supervision.items():
         G[tipo] = G[tipo] * permitido
 
@@ -1000,7 +1040,23 @@ def fuse(relations, ranks, weights=None, normalize="frobenius", masks=None,
     theta_split = _split_theta(theta or {}, sizes)
 
     norms_sq = {n: _observed_norm_sq(r, scale[n]) for n, r in relations.items()}
-    estado = _FitState(relations, sizes, ranks, scale, weight, block_rows)
+
+    # Con device="gpu" el loop trabaja sobre vistas residentes en la GPU;
+    # todo lo demas (escalas, normas, etiquetas, params) usa las relaciones
+    # originales en CPU, y el modelo final vuelve a numpy.
+    relations_fit = relations
+    if device == "gpu":
+        from . import gpu as _gpu
+        relations_fit = _gpu.convert_relations(relations)
+        G = {t: _gpu.to_device(f) for t, f in G.items()}
+        supervision = {t: _gpu.to_device(m) for t, m in supervision.items()}
+        laplacianos = {t: (_gpu.to_device(W), _gpu.to_device(g))
+                       for t, (W, g) in laplacianos.items()}
+        theta_split = {t: (_gpu.to_device(Tp), _gpu.to_device(Tn))
+                       for t, (Tp, Tn) in theta_split.items()}
+
+    estado = _FitState(relations_fit, sizes, ranks, scale, weight, block_rows,
+                       device=device)
 
     S = {}
     history = list(historia_previa)
@@ -1010,7 +1066,7 @@ def fuse(relations, ranks, weights=None, normalize="frobenius", masks=None,
     iteracion = 0
 
     for iteracion in range(1, max_iter + 1):
-        for nombre, relacion in relations.items():
+        for nombre in relations_fit:
             S[nombre] = estado.solve_backbone(nombre, G, lambda_S,
                                               S_prev=S.get(nombre))
 
@@ -1058,7 +1114,8 @@ def fuse(relations, ranks, weights=None, normalize="frobenius", masks=None,
                 G[tipo] /= np.maximum(normas, FLOOR)
 
         energia_previa = energia
-        perdida = _loss_now(relations, G, S, scale, weight, norms_sq, estado)
+        perdida = _loss_now(relations_fit, G, S, scale, weight, norms_sq,
+                            estado)
         history.append(perdida)
 
         if verbose and iteracion % verbose == 0:
@@ -1079,17 +1136,24 @@ def fuse(relations, ranks, weights=None, normalize="frobenius", masks=None,
     # Without this the backbones belong to the previous iterate, so
     # `transform` and `predict_proba` would assume an optimality that the
     # returned S does not satisfy.
-    for nombre in relations:
+    for nombre in relations_fit:
         S[nombre] = estado.solve_backbone(nombre, G, lambda_S,
                                           S_prev=S.get(nombre))
 
     rel_error = {}
-    for nombre, relacion in relations.items():
+    for nombre, relacion in relations_fit.items():
         M, filas = relacion.observed()
         G_src = G[relacion.src] if filas is None else G[relacion.src][filas]
         err_sq, norm_sq = _error_de(relacion, M, G_src, S[nombre],
-                                    G[relacion.dst], scale[nombre])
+                                    G[relacion.dst], scale[nombre],
+                                    estado.productos.get(nombre),
+                                    norms_sq.get(nombre))
         rel_error[nombre] = float(np.sqrt(err_sq / max(norm_sq, EPS)))
+
+    if device == "gpu":
+        G = {t: _gpu.to_host(f) for t, f in G.items()}
+        S = {n: _gpu.to_host(s) for n, s in S.items()}
+        muertas = {t: _gpu.to_host(idx) for t, idx in muertas.items()}
 
     params = dict(
         weights=weights, normalize=normalize, eta=eta, gauge=gauge,
@@ -1098,7 +1162,7 @@ def fuse(relations, ranks, weights=None, normalize="frobenius", masks=None,
         graphs=dict(graphs) or None, theta=dict(theta) if theta else None,
         lambda_S=lambda_S, lambda_G=lambda_G, alpha_graph=alpha_graph,
         max_iter=max_iter, tol=tol, init=init, random_state=random_state,
-        block_rows=block_rows, **extra_params,
+        block_rows=block_rows, device=device, **extra_params,
     )
     return FusionModel(
         G=G, S=S, rel={n: (r.src, r.dst) for n, r in relations.items()},
@@ -1124,21 +1188,33 @@ class _FitState:
     The Gram of a type is cached per (type, mask) rather than per type:
     with a row mask the destination side needs the MASKED Gram, and using
     the unmasked one changes the resulting factor by 70% in relative norm.
+
+    `productos` caches P = M @ G_dst per unweighted relation. The loss at
+    the end of an iteration computes P with the factors it just updated
+    and stores it; the backbone solve and the accumulation of the NEXT
+    iteration see the same factors, so they reuse it instead of running
+    their own sparse pass. This takes the sparse passes per iteration
+    from four to two (the loss pass and the transposed pass in
+    `accumulate`), at the cost of holding one (n_obs, c_dst) buffer per
+    relation across the iteration boundary.
     """
 
-    def __init__(self, relations, sizes, ranks, scale, weight, block_rows):
+    def __init__(self, relations, sizes, ranks, scale, weight, block_rows,
+                 device="cpu"):
         self.relations = relations
         self.sizes = sizes
         self.ranks = ranks
         self.scale = scale
         self.weight = weight
         self.block_rows = max(1, int(block_rows))
+        self.device = device
         # Pesos por entrada, normalizados para que el maximo sea 1: la
         # magnitud absoluta se pliega en beta, y con pesos acotados por 1
         # el punto fijo de S queda contraido. Una relacion cuyo peso
         # normalizado es uniforme e igual al fondo ES la perdida clasica
         # con beta * tope, y se enruta a la rama sin pesos.
         self.beta = dict(weight)
+        self.productos = {}
         self.pesos = {}
         for nombre, relacion in relations.items():
             if not relacion.weighted:
@@ -1181,8 +1257,24 @@ class _FitState:
         return sp.csr_matrix((info["delta_sub"] * R_sub, info["columnas_sub"],
                               info["indptr_sub"]), shape=shape)
 
+    def _producto(self, nombre, M, G_dst):
+        """P = M @ G_dst, reused from the loss of the previous iteration."""
+        P = self.productos.get(nombre)
+        if P is None:
+            P = M @ G_dst
+            self.productos[nombre] = P
+        return P
+
     def _gram(self, cache, tipo, G, filas):
-        clave = (tipo, None if filas is None else filas.tobytes())
+        if filas is None:
+            clave = (tipo, None)
+        elif isinstance(filas, np.ndarray):
+            clave = (tipo, filas.tobytes())
+        else:
+            # En GPU la mascara vive en el dispositivo y es el mismo objeto
+            # durante todo el ajuste; bajarla a bytes costaria una copia
+            # host-device por consulta.
+            clave = (tipo, id(filas))
         if clave not in cache:
             factor = G[tipo] if filas is None else G[tipo][filas]
             cache[clave] = factor.T @ factor
@@ -1208,18 +1300,21 @@ class _FitState:
         G_src = G[relacion.src] if filas is None else G[relacion.src][filas]
         G_dst = G[relacion.dst]
         c_i, c_j = G_src.shape[1], G_dst.shape[1]
-        A = G_src.T @ G_src + lambda_S * np.eye(c_i)
-        B = G_dst.T @ G_dst + lambda_S * np.eye(c_j)
+        xp = _xp(G_src)
+        A = G_src.T @ G_src + lambda_S * xp.eye(c_i)
+        B = G_dst.T @ G_dst + lambda_S * xp.eye(c_j)
         if info is None:
-            middle = G_src.T @ (M @ G_dst) * self.scale[nombre]
+            middle = G_src.T @ self._producto(nombre, M, G_dst) * self.scale[nombre]
         elif S_prev is not None and info["tiene_delta"]:
             DR = self._delta_por_reconstruccion(info, G_src, S_prev, G_dst,
                                                 M.shape)
             middle = G_src.T @ ((info["objetivo"] - DR) @ G_dst)
         else:
             middle = G_src.T @ (info["objetivo"] @ G_dst)
-        X = np.linalg.solve(A, middle)
-        paso = np.linalg.solve(B.T, X.T).T
+        X = np.linalg.solve(A, middle.astype(A.dtype, copy=False))
+        # El solve corre en float64 (la identidad promueve A y B); el
+        # resultado vuelve a la precision de trabajo de los factores.
+        paso = np.linalg.solve(B.T, X.T).T.astype(G_dst.dtype, copy=False)
         if info is None or S_prev is None:
             return paso
         return (1.0 - info["w0"]) * S_prev + paso
@@ -1258,31 +1353,49 @@ class _FitState:
             B_dst_pos, B_dst_neg = _split_signs(B_dst)
 
             n_obs = M.shape[0]
-            acc_dst_pos = np.zeros((self.sizes[dst], self.ranks[src]))
-            for inicio in range(0, n_obs, self.block_rows):
-                bloque = slice(inicio, min(inicio + self.block_rows, n_obs))
-                M_b = M[bloque]
-                G_src_b = G_src_obs[bloque]
-
-                A_b = (beta * s) * ((M_b @ G_dst) @ S_r.T)
-                A_pos, A_neg = _split_signs(A_b)
-                aporte_N = A_pos + G_src_b @ B_src_neg
-                aporte_D = A_neg + G_src_b @ B_src_pos
+            P = self._producto(nombre, M, G_dst)
+            if self.device == "gpu":
+                # Sin bloques: el pico de memoria que el bloqueo acota en
+                # CPU no gobierna en la GPU, y la pasada transpuesta va por
+                # cusparse sin materializar la transpuesta.
+                A_full = (beta * s) * (P @ S_r.T)
+                A_pos, A_neg = _split_signs(A_full)
+                aporte_N = A_pos + G_src_obs @ B_src_neg
+                aporte_D = A_neg + G_src_obs @ B_src_pos
                 if filas is None:
-                    N[src][bloque] += aporte_N
-                    D[src][bloque] += aporte_D
+                    N[src] += aporte_N
+                    D[src] += aporte_D
                 else:
-                    N[src][filas[bloque]] += aporte_N
-                    D[src][filas[bloque]] += aporte_D
+                    N[src][filas] += aporte_N
+                    D[src][filas] += aporte_D
+                acc_dst_pos = _gpu_spmm_transpose(M, G_src_obs)
+            else:
+                acc_dst_pos = np.zeros((self.sizes[dst], self.ranks[src]),
+                                       dtype=G_dst.dtype)
+                for inicio in range(0, n_obs, self.block_rows):
+                    bloque = slice(inicio, min(inicio + self.block_rows, n_obs))
+                    M_b = M[bloque]
+                    G_src_b = G_src_obs[bloque]
 
-                acc_dst_pos += M_b.T @ G_src_b
+                    A_b = (beta * s) * (P[bloque] @ S_r.T)
+                    A_pos, A_neg = _split_signs(A_b)
+                    aporte_N = A_pos + G_src_b @ B_src_neg
+                    aporte_D = A_neg + G_src_b @ B_src_pos
+                    if filas is None:
+                        N[src][bloque] += aporte_N
+                        D[src][bloque] += aporte_D
+                    else:
+                        N[src][filas[bloque]] += aporte_N
+                        D[src][filas[bloque]] += aporte_D
+
+                    acc_dst_pos += M_b.T @ G_src_b
 
             A_dst = (beta * s) * (acc_dst_pos @ S_r)
             A_dst_pos, A_dst_neg = _split_signs(A_dst)
             N[dst] += A_dst_pos + G_dst @ B_dst_neg
             D[dst] += A_dst_neg + G_dst @ B_dst_pos
 
-        energia = {t: float(np.sum(G[t] * D[t])) for t in G}
+        energia = {t: float(np.sum(G[t] * D[t], dtype=np.float64)) for t in G}
         return N, D, energia
 
     def _accumulate_weighted(self, N, D, G, S_r, relacion, info, beta, cache):
@@ -1383,6 +1496,19 @@ def _validate_supervision(supervision, sizes, ranks):
     return salida
 
 
+def _xp(a):
+    """numpy or cupy, whichever module holds the array."""
+    if isinstance(a, np.ndarray):
+        return np
+    import cupy
+    return cupy
+
+
+def _gpu_spmm_transpose(M, B):
+    from .gpu import spmm_transpose
+    return spmm_transpose(M, B)
+
+
 def _split_signs(M):
     """Return (M_pos, M_neg) with M = M_pos - M_neg, both non negative."""
     pos = np.where(M > 0.0, M, 0.0)
@@ -1472,9 +1598,10 @@ def _frobenius_scales(relations):
 
 
 def _norm_sq(M):
-    if sp.issparse(M):
-        return float(np.square(M.data.astype(np.float64, copy=False)).sum())
-    return float(np.square(np.asarray(M, dtype=np.float64)).sum())
+    # hasattr(indptr) en vez de sp.issparse para cubrir tambien las
+    # matrices de cupyx.scipy.sparse.
+    datos = M.data if hasattr(M, "indptr") else M
+    return float(np.square(datos.astype(np.float64, copy=False)).sum())
 
 
 def _observed_norm_sq(relacion, escala):
@@ -1482,11 +1609,13 @@ def _observed_norm_sq(relacion, escala):
     return _norm_sq(M) * escala * escala
 
 
-def _error_de(relacion, M, G_src, S_r, G_dst, escala):
+def _error_de(relacion, M, G_src, S_r, G_dst, escala, producto=None,
+              norm_sq=None):
     """(squared error, squared norm) of one relation, weighted-aware."""
     if relacion.weighted:
         return _weighted_squared_error(relacion, G_src, S_r, G_dst, escala)
-    return _squared_error_scaled(M, G_src, S_r, G_dst, escala)
+    return _squared_error_scaled(M, G_src, S_r, G_dst, escala, producto,
+                                 norm_sq)
 
 
 def _weighted_squared_error(relacion, G_src, S_r, G_dst, escala):
@@ -1524,12 +1653,16 @@ def _weighted_squared_error(relacion, G_src, S_r, G_dst, escala):
     return max(err, 0.0), max(norm, EPS)
 
 
-def _squared_error_scaled(M, G_src, S_r, G_dst, escala):
+def _squared_error_scaled(M, G_src, S_r, G_dst, escala, producto=None,
+                          norm_sq=None):
     """(||s M - G_i S G_j^T||^2, ||s M||^2), by the trace identity."""
-    G_src = np.asarray(G_src, dtype=np.float64)
-    G_dst = np.asarray(G_dst, dtype=np.float64)
-    norm_sq = _norm_sq(M) * escala * escala
-    middle = (G_src.T @ (M @ G_dst)) * escala
+    G_src = G_src.astype(np.float64, copy=False)
+    G_dst = G_dst.astype(np.float64, copy=False)
+    if norm_sq is None:
+        norm_sq = _norm_sq(M) * escala * escala
+    if producto is None:
+        producto = M @ G_dst
+    middle = (G_src.T @ producto) * escala
     gram_i = G_src.T @ G_src
     gram_j = G_dst.T @ G_dst
     cross = float(np.sum(middle * S_r))
@@ -1538,13 +1671,29 @@ def _squared_error_scaled(M, G_src, S_r, G_dst, escala):
 
 
 def _loss_now(relations, G, S, scale, weight, norms_sq, estado):
-    """Mean relative squared error over relations, by the trace identity."""
+    """Mean relative squared error over relations, by the trace identity.
+
+    For unweighted relations the sparse product M @ G_dst is computed
+    here with the factors of the CURRENT iterate and left in the fit
+    state, where the next iteration reuses it.
+    """
     total = 0.0
     for nombre, relacion in relations.items():
         M, filas = relacion.observed()
         G_src = G[relacion.src] if filas is None else G[relacion.src][filas]
+        producto = None
+        if not relacion.weighted:
+            producto = M @ G[relacion.dst]
+            estado.productos[nombre] = producto
+        else:
+            # La rama con pesos no pasa por aca, pero una relacion de pesos
+            # uniformes se enruta a la rama clasica y su producto cacheado
+            # quedo calculado con los factores anteriores: se invalida para
+            # que el solve siguiente lo recalcule.
+            estado.productos.pop(nombre, None)
         err_sq, norm_sq = _error_de(relacion, M, G_src, S[nombre],
-                                    G[relacion.dst], scale[nombre])
+                                    G[relacion.dst], scale[nombre], producto,
+                                    norms_sq.get(nombre))
         total += err_sq / max(norm_sq, EPS)
     return float(total / len(relations))
 

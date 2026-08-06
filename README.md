@@ -31,6 +31,40 @@ uv pip install -e .
 
 Opcional: `uv pip install -e ".[viz]"` para el diagrama de relaciones.
 
+### GPU (opcional)
+
+`fuse(..., device="gpu")` corre el loop de ajuste en una GPU CUDA a través de
+CuPy. En sistemas sin GPU no hay que instalar ni configurar nada: el default
+`device="cpu"` nunca importa cupy y la librería funciona igual que siempre.
+
+Para habilitarla:
+
+```bash
+uv pip install -e ".[gpu]"    # o: uv sync --extra gpu
+```
+
+Requisitos y detalles:
+
+- Driver NVIDIA con soporte CUDA 13 (verificable con `nvidia-smi`). El extra
+  resuelve a `cupy-cuda13x[ctk]`, que trae las bibliotecas y headers de CUDA
+  como wheels; no hace falta un CUDA Toolkit del sistema. Con un driver CUDA
+  12, instalar `cupy-cuda12x[ctk]` en su lugar.
+- La librería configura sola la variable `CUDA_PATH` hacia los wheels NVIDIA
+  (layout `nvidia/cu13/lib`, que `cuda-pathfinder` 1.6 no busca por sí solo);
+  si `CUDA_PATH` ya está definida, se respeta.
+- Datos en `float32`: en GPUs de consumo el `float64` corre a una fracción del
+  `float32`. La precisión de trabajo sigue a los datos, igual que en CPU.
+- El modelo ajustado vuelve en numpy, así que `save`, `transform` y
+  `predict_proba` no cambian. `datafiusion.gpu.available()` dice si el
+  dispositivo es utilizable sin lanzar excepciones.
+- Sin soporte GPU todavía: relaciones Poisson y pesos por entrada (el ajuste
+  lo indica con un error claro y se corre en CPU).
+
+Medido en una RTX 2080 contra un hilo de CPU, ambos en `float32`: 5.8x en una
+relación de 200k por 5k con 5M de entradas y 7.6x en una de 2M por 10k con 50M
+de entradas, con desvío de la pérdida bajo $10^{-6}$
+(`examples/gpu/comparacion.py`).
+
 ## Uso
 
 ```python
@@ -315,6 +349,7 @@ medida, y sus fragmentos de código corren tal como aparecen.
 | `fuse(relations, ranks, ...)` | `model` | Ajusta y devuelve un `FusionModel`. |
 | `fuse(..., supervision={tipo: L})` | `model` | Ancla componentes a etiquetas conocidas (TS-NMF). |
 | `fuse(..., n_runs=k)` | `model` | Reinicios aleatorios; devuelve la corrida de menor pérdida. |
+| `fuse(..., device="gpu")` | `model` | Ajuste en GPU CUDA vía CuPy; el modelo vuelve en numpy. |
 | `Relation(..., family="poisson")` | `model` | Relación de conteos por KL generalizada. |
 | `Relation(..., preprocess="log1p")` | `model` | Transformación de valores que viaja con el modelo. |
 | `FusionModel.transform(relations, target)` | `model` | Proyecta entidades nuevas, sin refit. |
@@ -342,9 +377,9 @@ ellas. Incluye la comparación contra baselines, la comparación entre rutas de 
 la comparación contra la implementación de referencia y un benchmark de escala.
 Ver `examples/movielens/README.md`.
 
-Los datos vienen incluidos con `scikit-fusion` (6.5 MB, sin descarga). Con
-`scikit-fusion` instalado se encuentran solos; si no, se apunta `MOVIELENS_DIR` al
-directorio del dataset.
+Los datos son la copia que distribuye `scikit-fusion` (6.5 MB, sin descarga).
+`MOVIELENS_DIR` apunta al directorio del dataset (en un checkout,
+`skfusion/datasets/data/movielens`); con el paquete instalado se encuentran solos.
 
 `examples/lastfm/` agrega el caso de familias mezcladas sobre conteos reales
 (Last.fm HetRec 2011, descarga de 2.5 MB, uso no comercial), y
@@ -356,7 +391,8 @@ directorio del dataset.
 uv run pytest
 ```
 
-115 tests. Cubren la identidad de traza contra el cálculo denso, la familia Poisson
+144 tests (los 10 de GPU se saltan solos sin tarjeta CUDA). Cubren la identidad
+de traza contra el cálculo denso, la familia Poisson
 (descenso monótono de la desviación, recuperación de bloques plantados, fusión
 mezclada con gaussianas), que el preprocesamiento declarado equivale al manual y
 reusa el idf del entrenamiento en datos nuevos, la invariancia de la
@@ -367,9 +403,12 @@ SDDMM contra el producto denso, la reducción exacta de los pesos uniformes a la
 clásica, el roundtrip de guardado con supervisión, máscaras y grafos, las máscaras de
 fila en `transform`, y que la ruta congelada siga dando los mismos números.
 
-La comparación contra `scikit-fusion` está en `tests/test_compare_skfusion.py`. Como
-test corre una versión reducida y se salta si `scikit-fusion` no está instalado (no
-está en PyPI; se instala desde un checkout). Como script imprime el reporte completo.
+La comparación contra `scikit-fusion` está en `tests/test_compare_skfusion.py` y
+corre sin instalarlo: compara contra sus trazas guardadas en
+`tests/data/referencia_skfusion.json`, generadas cuando ambas bibliotecas
+convivieron en el entorno. Como script imprime el reporte completo, y la
+referencia se regenera con `tests/data/generar_referencia_skfusion.py` desde un
+checkout (no está en PyPI).
 
 ## Oportunidades de mejora
 
