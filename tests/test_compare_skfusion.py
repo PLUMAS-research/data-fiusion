@@ -1,103 +1,65 @@
-"""Compare datafiusion.dfmf_sparse against scikit-fusion.fusion.Dfmf.
+"""Compare datafiusion.dfmf_sparse against stored scikit-fusion traces.
 
-The two implementations are not numerically identical because:
+The parity with scikit-fusion was validated live while both libraries
+were installed side by side. What survives here is the reference:
+`tests/data/referencia_skfusion.json` stores the error traces that
+scikit-fusion's Dfmf produced on the synthetic instances below, so the
+comparison runs without the dependency. To regenerate the reference
+(only needed if the instances change), install a scikit-fusion checkout
+and run `tests/data/generar_referencia_skfusion.py`.
 
-  1. They use different random number streams (np.random.default_rng vs
-     np.random.RandomState), so factor initializations differ even with
-     the same seed.
-  2. The new implementation solves S in closed form with Tikhonov
-     regularization (lambda_S=0 here so the solve reduces to a least
-     squares); scikit-fusion uses pinv on G^T G, which is mathematically
-     equivalent but numerically distinct.
+The two implementations are not numerically identical: the random
+streams differ (np.random.default_rng vs RandomState) and S is solved
+with np.linalg.solve instead of pinv. The comparison therefore checks
+structural properties and qualitative parity:
 
-So the comparison checks structural properties and qualitative parity:
-
-  - Factor and backbone dimensions are identical.
-  - Both errors decrease monotonically (allowing small violations).
+  - Factor and backbone dimensions are as declared.
+  - The datafiusion error trace decreases monotonically (allowing small
+    violations); the stored scikit-fusion trace did too.
   - Final reconstruction errors are within a factor of 2 of each other.
-  - Both approach the noise floor on synthetic low-rank data.
 
 Run as a script for the full report:
 
     uv run python tests/test_compare_skfusion.py
 
-Run under pytest for a reduced parity check:
+Run under pytest for the reduced parity check:
 
     uv run pytest tests/test_compare_skfusion.py
-
-scikit-fusion is a development dependency and is not on PyPI, so it has
-to be installed from a checkout. If it is not importable, the script
-exits with code 2 and prints how to install it; the pytest check skips.
 """
 
+import json
+import pathlib
 import sys
+
 import numpy as np
 import scipy.sparse as sp
 
 from datafiusion.core import dfmf_sparse, reconstruction_error
 
 
-def _patch_skfusion_par_bdot():
-    """Workaround for the `entry != []` comparison that fails on numpy >= 1.25.
+REFERENCIA = pathlib.Path(__file__).with_name("data") / "referencia_skfusion.json"
 
-    In scikit-fusion master, _par_bdot filters entries with `entry != []`, but
-    `entry` can be an ndarray, and numpy now raises rather than broadcasting
-    the comparison to an array of booleans. We replace the filter so it
-    distinguishes empty lists from ndarrays explicitly.
-    """
-    from joblib import Parallel, delayed
-    import skfusion.fusion.decomposition._dfmf as _dfmf
-
-    bdot = getattr(_dfmf, "__bdot", None) or getattr(_dfmf, "_dfmf__bdot", None)
-    if bdot is None:
-        for name in dir(_dfmf):
-            if name.endswith("__bdot"):
-                bdot = getattr(_dfmf, name)
-                break
-    if bdot is None:
-        raise RuntimeError("Could not locate __bdot inside skfusion._dfmf")
-
-    def _par_bdot(A, B, obj_types, verbose, n_jobs):
-        parallelizer = Parallel(
-            n_jobs=n_jobs, max_nbytes=1e3, verbose=verbose, backend="multiprocessing"
-        )
-        task_iter = (
-            delayed(bdot)(A, B, i, j, obj_types)
-            for i in obj_types for j in obj_types
-        )
-        entries = parallelizer(task_iter)
-        return {
-            (i, j): entry
-            for i, j, entry in entries
-            if not (isinstance(entry, list) and len(entry) == 0)
-        }
-
-    _dfmf._par_bdot = _par_bdot
+INSTANCIAS = {
+    "reducida": dict(n=(24, 18, 12), c=(4, 3, 2), noise=0.05, seed=0,
+                     max_iter=50, paso=10),
+    "completa": dict(n=(40, 30, 20), c=(5, 4, 3), noise=0.05, seed=0,
+                     max_iter=100, paso=10),
+}
 
 
-def _importar_skfusion():
-    """Apply compatibility shims, then import scikit-fusion.
-
-    scikit-fusion still references np.float, np.int and
-    collections.Iterable, so the shims must be in place before the
-    import. For this reason pytest.importorskip cannot replace this
-    function. Applies _patch_skfusion_par_bdot after the import and
-    returns the skfusion.fusion module. Raises ImportError if
-    scikit-fusion is not installed.
-    """
-    if not hasattr(np, "float"):
-        np.float = float
-    if not hasattr(np, "int"):
-        np.int = int
-
-    import collections
-    import collections.abc
-    if not hasattr(collections, "Iterable"):
-        collections.Iterable = collections.abc.Iterable
-
-    from skfusion import fusion as skf
-    _patch_skfusion_par_bdot()
-    return skf
+def referencia_skfusion(nombre):
+    """Stored scikit-fusion trace for one instance, validated against INSTANCIAS."""
+    todo = json.loads(REFERENCIA.read_text())
+    guardado = dict(todo["instancias"][nombre], generado_con=todo["generado_con"])
+    esperado = INSTANCIAS[nombre]
+    for clave in ("n", "c", "noise", "seed", "max_iter", "paso"):
+        if list(np.atleast_1d(esperado[clave])) != list(np.atleast_1d(guardado[clave])):
+            raise RuntimeError(
+                f"la referencia guardada no corresponde a la instancia "
+                f"{nombre!r} ({clave}: {guardado[clave]!r} contra "
+                f"{esperado[clave]!r}); regenerar con "
+                "tests/data/generar_referencia_skfusion.py")
+    return guardado
 
 
 def make_low_rank_data(n1, n2, n3, c1, c2, c3, noise, seed):
@@ -189,40 +151,6 @@ def _resume_dfmf_sparse(R, ranks, G_init, max_iter):
     return G, S
 
 
-def run_skfusion(skf, R12, R13, R23, ranks, max_iter, seed):
-    t1 = skf.ObjectType("t1", ranks[0])
-    t2 = skf.ObjectType("t2", ranks[1])
-    t3 = skf.ObjectType("t3", ranks[2])
-    rel12 = skf.Relation(R12, t1, t2)
-    rel13 = skf.Relation(R13, t1, t3)
-    rel23 = skf.Relation(R23, t2, t3)
-    fg = skf.FusionGraph([rel12, rel13, rel23])
-
-    errors = []
-    step = 10
-    fuser = None
-    for chunk_start in range(0, max_iter, step):
-        chunk = min(step, max_iter - chunk_start)
-        total_so_far = chunk_start + chunk
-        fuser = skf.Dfmf(
-            max_iter=total_so_far, init_type="random",
-            random_state=np.random.RandomState(seed),
-        ).fuse(fg)
-        G = {"t1": fuser.factor(t1), "t2": fuser.factor(t2), "t3": fuser.factor(t3)}
-        S12 = fuser.backbone(rel12)
-        S13 = fuser.backbone(rel13)
-        S23 = fuser.backbone(rel23)
-        err = (
-            relative_frobenius(R12, G["t1"] @ S12 @ G["t2"].T)
-            + relative_frobenius(R13, G["t1"] @ S13 @ G["t3"].T)
-            + relative_frobenius(R23, G["t2"] @ S23 @ G["t3"].T)
-        )
-        errors.append(err)
-    final_G = G
-    final_S = {("t1", "t2"): [S12], ("t1", "t3"): [S13], ("t2", "t3"): [S23]}
-    return final_G, final_S, errors
-
-
 def check_monotone(errors, tol_violations=2):
     diffs = np.diff(errors)
     violations = int((diffs > 1e-6).sum())
@@ -238,63 +166,62 @@ def _first_under(trace, threshold, step=10):
 
 
 def test_paridad_reducida():
-    """Reduced parity check: small matrices, few iterations.
+    """Reduced parity check against the stored scikit-fusion trace.
 
-    Asserts equal factor and backbone dimensions, monotone descent of
-    both error traces, and final errors within a factor of 2.
+    Asserts declared factor and backbone dimensions, monotone descent of
+    the datafiusion trace, and a final error within a factor of 2 of the
+    stored scikit-fusion result on the same instance.
     """
-    import pytest
+    params = INSTANCIAS["reducida"]
+    ref = referencia_skfusion("reducida")
 
-    try:
-        skf = _importar_skfusion()
-    except ImportError as e:
-        pytest.skip(f"scikit-fusion no importable: {e}")
-
-    n1, n2, n3 = 24, 18, 12
-    c1, c2, c3 = 4, 3, 2
-    ranks = (c1, c2, c3)
-    max_iter = 50
-    seed = 0
-
+    n1, n2, n3 = params["n"]
+    c1, c2, c3 = params["c"]
     R12, R13, R23, _ = make_low_rank_data(
-        n1, n2, n3, c1, c2, c3, noise=0.05, seed=seed
+        n1, n2, n3, c1, c2, c3, noise=params["noise"], seed=params["seed"]
     )
-    G_new, S_new, err_new = run_datafiusion(R12, R13, R23, ranks, max_iter, seed)
-    G_old, S_old, err_old = run_skfusion(skf, R12, R13, R23, ranks, max_iter, seed)
+    G_new, S_new, err_new = run_datafiusion(
+        R12, R13, R23, params["c"], params["max_iter"], params["seed"]
+    )
 
     for t, n, c in (("t1", n1, c1), ("t2", n2, c2), ("t3", n3, c3)):
         assert G_new[t].shape == (n, c)
-        assert G_old[t].shape == (n, c)
     for par, dims in (
         (("t1", "t2"), (c1, c2)),
         (("t1", "t3"), (c1, c3)),
         (("t2", "t3"), (c2, c3)),
     ):
         assert S_new[par][0].shape == dims
-        assert S_old[par][0].shape == dims
 
     monotona_new, viol_new = check_monotone(err_new)
-    monotona_old, viol_old = check_monotone(err_old)
     assert monotona_new, f"traza datafiusion no desciende ({viol_new} violaciones)"
-    assert monotona_old, f"traza skfusion no desciende ({viol_old} violaciones)"
+    monotona_ref, viol_ref = check_monotone(ref["traza"])
+    assert monotona_ref, f"traza skfusion guardada no desciende ({viol_ref} violaciones)"
 
-    razon = err_new[-1] / err_old[-1]
+    razon = err_new[-1] / ref["traza"][-1]
     assert 0.5 <= razon <= 2.0, (
-        f"errores finales fuera de factor 2: {err_new[-1]:.4f} vs {err_old[-1]:.4f}"
+        f"errores finales fuera de factor 2: {err_new[-1]:.4f} contra "
+        f"{ref['traza'][-1]:.4f} de la referencia"
     )
 
 
 def main():
-    n1, n2, n3 = 40, 30, 20
-    c1, c2, c3 = 5, 4, 3
-    ranks = (c1, c2, c3)
-    max_iter = 100
-    seed = 0
-    noise = 0.05
+    params = INSTANCIAS["completa"]
+    try:
+        ref = referencia_skfusion("completa")
+    except FileNotFoundError:
+        print(f"No existe {REFERENCIA}.")
+        print("Regenerar con un checkout de scikit-fusion instalado:")
+        print("  uv run python tests/data/generar_referencia_skfusion.py")
+        sys.exit(2)
+
+    n1, n2, n3 = params["n"]
+    c1, c2, c3 = params["c"]
+    max_iter, seed = params["max_iter"], params["seed"]
 
     print("Generating low-rank synthetic data:")
     R12, R13, R23, noise_floor = make_low_rank_data(
-        n1, n2, n3, c1, c2, c3, noise=noise, seed=seed
+        n1, n2, n3, c1, c2, c3, noise=params["noise"], seed=seed
     )
     print(f"  shapes: R12={R12.shape}, R13={R13.shape}, R23={R23.shape}")
     print(f"  ranks: t1={c1}, t2={c2}, t3={c3}")
@@ -304,7 +231,7 @@ def main():
     print("datafiusion.dfmf_sparse  (init='random')")
     print("=" * 60)
     G_new, S_new, err_new_trace = run_datafiusion(
-        R12, R13, R23, ranks, max_iter, seed, init="random"
+        R12, R13, R23, params["c"], max_iter, seed, init="random"
     )
     print(f"  factor dims: t1={G_new['t1'].shape}, t2={G_new['t2'].shape}, t3={G_new['t3'].shape}")
     print(f"  backbone dims: t1-t2={S_new[('t1','t2')][0].shape}, "
@@ -319,7 +246,7 @@ def main():
     print("datafiusion.dfmf_sparse  (init='nndsvd')")
     print("=" * 60)
     G_svd, S_svd, err_svd_trace = run_datafiusion(
-        R12, R13, R23, ranks, max_iter, seed, init="nndsvd"
+        R12, R13, R23, params["c"], max_iter, seed, init="nndsvd"
     )
     print(f"  factor dims: t1={G_svd['t1'].shape}, t2={G_svd['t2'].shape}, t3={G_svd['t3'].shape}")
     print(f"  error trace (every 10 iter): {[f'{e:.3f}' for e in err_svd_trace]}")
@@ -328,23 +255,12 @@ def main():
     print(f"  monotone descent: {'PASS' if svd_monotone else 'FAIL'} "
           f"({svd_violations} small increases tolerated)\n")
 
-    try:
-        skf = _importar_skfusion()
-    except ImportError as e:
-        print("scikit-fusion not importable:")
-        print(f"  {e}")
-        print("\nInstall it from a checkout and run again:")
-        print("  uv pip install -e <path to scikit-fusion> --python .venv/bin/python")
-        print("  uv run python tests/test_compare_skfusion.py")
-        sys.exit(2)
-
     print("=" * 60)
-    print("skfusion.fusion.Dfmf")
+    print("skfusion.fusion.Dfmf (stored reference)")
     print("=" * 60)
-    G_old, S_old, err_old_trace = run_skfusion(skf, R12, R13, R23, ranks, max_iter, seed)
-    print(f"  factor dims: t1={G_old['t1'].shape}, t2={G_old['t2'].shape}, t3={G_old['t3'].shape}")
-    print(f"  backbone dims: t1-t2={S_old[('t1','t2')][0].shape}, "
-          f"t1-t3={S_old[('t1','t3')][0].shape}, t2-t3={S_old[('t2','t3')][0].shape}")
+    err_old_trace = ref["traza"]
+    print(f"  generated with: scikit-fusion {ref['generado_con']['skfusion']} "
+          f"(tests/data/referencia_skfusion.json)")
     print(f"  error trace (every 10 iter): {[f'{e:.3f}' for e in err_old_trace]}")
     print(f"  final error: {err_old_trace[-1]:.4f}")
     old_monotone, old_violations = check_monotone(err_old_trace)
@@ -359,26 +275,23 @@ def main():
     for t, c in (("t1", c1), ("t2", c2), ("t3", c3)):
         n_expected = G_new[t].shape[0]
         ok_new = G_new[t].shape == (n_expected, c)
-        ok_old = G_old[t].shape == (n_expected, c)
-        ok_match = G_new[t].shape == G_old[t].shape
-        status = "PASS" if ok_new and ok_old and ok_match else "FAIL"
-        print(f"  factor[{t}] shape match: {status} "
-              f"(new={G_new[t].shape}, old={G_old[t].shape})")
-        if not (ok_new and ok_old and ok_match):
+        status = "PASS" if ok_new else "FAIL"
+        print(f"  factor[{t}] shape: {status} ({G_new[t].shape})")
+        if not ok_new:
             failures.append(f"shape mismatch for {t}")
 
     print(f"  datafiusion (random) monotone: "
           f"{'PASS' if new_monotone else 'FAIL'} ({new_violations} violations)")
     print(f"  datafiusion (nndsvd) monotone: "
           f"{'PASS' if svd_monotone else 'FAIL'} ({svd_violations} violations)")
-    print(f"  skfusion monotone:             "
+    print(f"  skfusion (stored) monotone:    "
           f"{'PASS' if old_monotone else 'FAIL'} ({old_violations} violations)")
     if not new_monotone:
         failures.append(f"datafiusion random not monotone ({new_violations} violations)")
     if not svd_monotone:
         failures.append(f"datafiusion nndsvd not monotone ({svd_violations} violations)")
     if not old_monotone:
-        failures.append(f"skfusion not monotone ({old_violations} violations)")
+        failures.append(f"stored skfusion trace not monotone ({old_violations} violations)")
 
     print()
     print("=" * 60)
@@ -389,7 +302,7 @@ def main():
           f"(gap: {err_new_trace[-1] - noise_floor:+.4f})")
     print(f"  datafiusion (nndsvd) final:   {err_svd_trace[-1]:.4f}  "
           f"(gap: {err_svd_trace[-1] - noise_floor:+.4f})")
-    print(f"  skfusion final:               {err_old_trace[-1]:.4f}  "
+    print(f"  skfusion (stored) final:      {err_old_trace[-1]:.4f}  "
           f"(gap: {err_old_trace[-1] - noise_floor:+.4f})")
     print()
     threshold = max(0.10, 2 * noise_floor)
@@ -397,7 +310,7 @@ def main():
           f"{_first_under(err_new_trace, threshold)}")
     print(f"  iterations to reach {threshold:.3f} (datafiusion nndsvd): "
           f"{_first_under(err_svd_trace, threshold)}")
-    print(f"  iterations to reach {threshold:.3f} (skfusion):           "
+    print(f"  iterations to reach {threshold:.3f} (skfusion, stored):   "
           f"{_first_under(err_old_trace, threshold)}")
     print()
     print("  Note: different errors at fixed max_iter reflect convergence speed,")
