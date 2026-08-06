@@ -305,6 +305,31 @@ mismas relaciones reproduce las mismas unidades sin repetir nada a mano.
 `modelo.history` tiene la pérdida en cada iteración: sirve para ver si ya convergió sin
 tener que volver a ajustar con otro `max_iter`.
 
+## Ajustar en GPU {.smaller}
+
+```python
+import numpy as np
+
+relaciones = {
+    "ratings": Relation(src="usuario", dst="pelicula",
+                        matrix=M_ratings.astype(np.float32)),
+    "generos": Relation(src="pelicula", dst="genero",
+                        matrix=M_generos.astype(np.float32)),
+}
+modelo = fuse(relaciones, ranks, device="gpu")
+modelo.G["pelicula"]   # numpy, igual que con device="cpu"
+```
+
+El loop corre en la GPU (cuSPARSE y cuBLAS vía CuPy) y el modelo vuelve en numpy,
+así que guardar, `transform` y `predict_proba` no cambian.
+
+Se instala con `uv sync --extra gpu` y requiere un driver NVIDIA con CUDA 13.
+Sin GPU no hay nada que instalar: el default `device="cpu"` nunca importa cupy.
+
+Los datos van en `float32` porque en GPUs de consumo el `float64` corre a una
+fracción de la velocidad. Sin soporte todavía: relaciones Poisson y pesos por
+entrada.
+
 # Glosario de métricas
 
 ## Predecir un atributo {.smaller}
@@ -596,6 +621,27 @@ Entre 2 y 5 veces más rápido, y entre 8 y 10 veces menos memoria. El modelo qu
 es el mismo: con la misma inicialización, 0.476 contra 0.442 de AP, que es la diferencia
 esperable entre dos generadores aleatorios.
 
+## El loop de ajuste quedó entre 10 y 14 veces más rápido {.smaller}
+
+Tres cambios acumulables, medidos sobre la misma instancia, semilla y 10
+iteraciones. La pérdida final coincide a 6 decimales en las cuatro
+configuraciones, así que las cuatro producen el mismo ajuste.
+
+- **Caché de productos.** El loop hacía cuatro pasadas sparse por relación e
+  iteración donde bastan dos: el producto $M G_{dst}$ ahora se calcula una vez,
+  dentro de la pérdida, y el solve de $S$ y la acumulación siguiente lo
+  reutilizan. 1.3x, con trayectoria bit a bit idéntica.
+- **float32.** Con los datos en `float32`, los factores y buffers siguen esa
+  precisión y la pérdida se acumula en `float64`. La mitad de memoria en
+  factores y entre 1.8x y 2.0x acumulado.
+- **GPU.** `device="gpu"` corre el loop en cuSPARSE y cuBLAS. 10.5x acumulado en
+  la instancia chica y 13.8x en la grande. Como referencia, el techo medido de
+  paralelizar el loop en CPU es 3x.
+
+## {.image}
+
+![](img/rendimiento.png)
+
 ## Calidad al agrupar {.smaller}
 
 Agrupando películas en 19 grupos, contra los géneros como referencia:
@@ -633,18 +679,18 @@ Si lo único que necesitas es predecir un atributo desde una matriz, empieza por
 
 ## Pendientes, en orden de utilidad {.smaller}
 
-**Rendimiento del bucle.** El 70% del tiempo se va en productos sparse en un solo hilo,
-y hay tres pasadas por matriz donde bastan dos. El techo de paralelizarlo está medido en
-3x, no más, porque la operación está limitada por acceso a memoria.
+**Sincronizaciones del loop GPU.** La suma de los kernels de una iteración
+proyecta 38x contra CPU y el ajuste completo da 7.6x; la brecha son lanzamientos
+y sincronizaciones por iteración. El paso siguiente es acumular la pérdida en el
+dispositivo y bajarla cada tantas iteraciones.
 
 **Parada temprana por error de validación.** Las entradas retenidas ya se pueden
 puntuar; falta engancharlas al loop de ajuste.
 
 **`transform` bajo Poisson**, y máscaras o pesos por entrada sobre la relación
-Poisson misma.
+Poisson misma. Poisson y los pesos por entrada tampoco corren en GPU.
 
-**Ingesta desde DataFrames** sin pasar por una matriz densa, y la brecha de 1.6%
-entre las dos rutas, con su sospechoso anotado.
+**La brecha de 1.6% entre las dos rutas**, con su sospechoso anotado.
 
 `docs/oportunidades.md` tiene el detalle, incluido lo que ya se probó y no funcionó,
 para no repetirlo.
@@ -658,6 +704,7 @@ para no repetirlo.
 | Un caso completo con verdad de referencia | `examples/movielens/README.md` |
 | Semi-supervisión y conteos en texto | `examples/newsgroups/README.md` |
 | Familias mezcladas con datos reales | `examples/lastfm/README.md` |
+| Ajustar en GPU, con los tiempos medidos | `examples/gpu/README.md` |
 | Saber qué falta y qué se descartó | `docs/oportunidades.md` |
 | Entender por qué el diseño es así | `docs/diseno-regularizacion.md` |
 
