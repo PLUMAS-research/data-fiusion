@@ -95,7 +95,7 @@ def fit_families(relations, ranks, weights=None, supervision=None,
 
     vacias = _entities_without_data(relations, sizes)
     if vacias:
-        detalle = ", ".join(f"{len(idx)} de tipo {tipo!r}" for tipo, idx in vacias.items())
+        detalle = ", ".join(f"{len(idx)} of type {tipo!r}" for tipo, idx in vacias.items())
         warnings.warn(
             f"there are entities with no observation in any relation ({detalle}). "
             "Their factors collapse to zero and argmax assigns all of them to "
