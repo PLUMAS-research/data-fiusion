@@ -617,15 +617,15 @@ matrices, sobre el mismo problema y con la misma inicialización:
 | 3310 x 29 776 | 1.1 s, 123 MB | 5.8 s, 1 247 MB |
 | 3310 x 108 536 | 5.8 s, 386 MB | 23.5 s, 4 031 MB |
 
-Entre 2 y 5 veces más rápido, y entre 8 y 10 veces menos memoria. El modelo que produce
-es el mismo: con la misma inicialización, 0.476 contra 0.442 de AP, que es la diferencia
-esperable entre dos generadores aleatorios.
+Entre 2.7 y 5.2 veces más rápido, y alrededor de 10 veces menos memoria. El modelo que
+produce es el mismo: con la misma inicialización, 0.476 contra 0.442 de AP, que es la
+diferencia esperable entre dos generadores aleatorios.
 
 ## El loop de ajuste quedó entre 10 y 14 veces más rápido {.smaller}
 
-Tres cambios acumulables, medidos sobre la misma instancia, semilla y 10
-iteraciones. La pérdida final coincide a 6 decimales en las cuatro
-configuraciones, así que las cuatro producen el mismo ajuste.
+Tres cambios acumulables sobre la misma instancia, semilla y 10 iteraciones, medidos
+contra la ruta anterior en CPU y `float64`. La pérdida final coincide a 6 decimales en
+las cuatro configuraciones, así que las cuatro producen el mismo ajuste.
 
 - **Caché de productos.** El loop hacía cuatro pasadas sparse por relación e
   iteración donde bastan dos: el producto $M G_{dst}$ ahora se calcula una vez,
@@ -637,10 +637,6 @@ configuraciones, así que las cuatro producen el mismo ajuste.
 - **GPU.** `device="gpu"` corre el loop en cuSPARSE y cuBLAS. 10.5x acumulado en
   la instancia chica y 13.8x en la grande. Como referencia, el techo medido de
   paralelizar el loop en CPU es 3x.
-
-## {.image}
-
-![](img/rendimiento.png)
 
 ## Calidad al agrupar {.smaller}
 
@@ -706,7 +702,9 @@ para no repetirlo.
 | Familias mezcladas con datos reales | `examples/lastfm/README.md` |
 | Ajustar en GPU, con los tiempos medidos | `examples/gpu/README.md` |
 | Saber qué falta y qué se descartó | `docs/oportunidades.md` |
-| Entender por qué el diseño es así | `docs/diseno-regularizacion.md` |
+| Por qué cada palanca es como es | docstring de `fuse` |
 
-Los fragmentos de la guía corren tal como aparecen, y cada número de estas slides
-se reproduce con un script de `examples/`.
+Los fragmentos de la guía son plantillas sobre un dominio de ejemplo. Los números de
+calidad y de costo contra `scikit-fusion` salen de los scripts de `examples/`; los de
+la tabla de aceleración acumulada se midieron aparte, sobre la instancia sintética que
+describe la misma slide.

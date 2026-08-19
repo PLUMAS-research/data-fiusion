@@ -85,9 +85,6 @@ lote = relations_from_frames(
 derivado = modelo.transform(lote, target="usuario")
 ```
 
-No usar `DataFusionModel` (el wrapper de `base.py`) con datos grandes: densifica
-para alinear índices. Está en el repo por compatibilidad.
-
 ### Transformar los conteos antes de ajustar
 
 Con conteos sobredispersos (viajes, reproducciones, palabras), la pérdida
@@ -103,14 +100,49 @@ Relation(src="usuario", dst="zona", matrix=matriz, preprocess="log1p")
 se guardan con él, y `transform` y `loss` la reaplican a datos nuevos crudos. Eso
 elimina el error silencioso de ajustar sobre `log1p(X)` y proyectar `X` crudo.
 Registro disponible: `log1p`, `sqrt`, `anscombe` desplazada, `idf`, componibles
-(`preprocess=("log1p", "idf")`).
+(`preprocess=("log1p", "idf")`). Es un registro cerrado a propósito, porque los nombres
+y su estado se persisten con `save` y un callable no se puede guardar.
 
 Evidencia: en Last.fm, log1p ganó a los conteos crudos por 0.314 contra 0.156 de AP
 (`examples/lastfm/README.md`); en 20 Newsgroups, TF-IDF ganó a todo
-(`examples/newsgroups/README.md`). Existe `family="poisson"` para modelar conteos
-con su likelihood, y perdió o empató contra estas transformaciones en todos los
-protocolos medidos: úsala solo si el modelo de conteo se necesita por sus
-propiedades, no por accuracy.
+(`examples/newsgroups/README.md`).
+
+`reconstruct_entries(..., original=True)` invierte la cadena para leer las
+reconstrucciones en unidades originales. Es una aproximación legible, no la media
+condicional.
+
+### Modelar los conteos con su likelihood
+
+`Relation(..., family="poisson")` cambia la pérdida de esa relación a la divergencia
+KL generalizada, que es la likelihood de Poisson para conteos. El costo sigue siendo
+O(nnz por rango): la masa total de la reconstrucción colapsa a tamaño rango por las
+sumas de columna, y el término logarítmico solo se evalúa en las entradas almacenadas.
+
+Tres consecuencias del cambio de pérdida:
+
+- el backbone $S$ pasa a ser no negativo y se actualiza de forma multiplicativa,
+  porque la reconstrucción debe ser positiva;
+- los datos no se normalizan por Frobenius, así que el balance entre relaciones se
+  controla con `weights`;
+- la pérdida reportada es la razón de desviación KL(X||R) / KL(X||tasa constante),
+  donde 0 es ajuste perfecto y 1 es el modelo nulo.
+
+Las familias se pueden mezclar en un mismo ajuste: una relación de conteos Poisson
+junto a relaciones gaussianas con sus máscaras y pesos por entrada, compartiendo
+factores. El paso conjunto minimiza la suma de los majorizantes de ambas familias en
+forma cerrada, y se reduce a la regla clásica sin Poisson y a la regla KL sin
+gaussianas. El balance entre familias no tiene unidad natural, así que el peso relativo
+entre una relación Poisson y una gaussiana se valida, no se hereda de otro ajuste.
+
+Con Poisson no están disponibles todavía `transform`, las máscaras de fila ni los pesos
+por entrada sobre la relación Poisson misma, ni el ajuste en GPU. Los pesos por fila o
+por columna (idf, por ejemplo) se expresan escalando los datos: la KL ponderada por
+columna equivale a la KL sobre la matriz con las columnas escaladas.
+
+Medido en dos datasets, modelar los conteos con su likelihood no superó a
+transformarlos bajo la cuadrática, así que conviene usar la familia cuando el modelo de
+conteo se necesita por sus propiedades (tasas, interpretación generativa) y no como
+palanca de precisión.
 
 ### Qué significa un cero
 
@@ -130,6 +162,54 @@ una fila enmascarada no afecta el ajuste (test a $10^{-12}$).
 
 `background` controla los ceros no almacenados: `1.0` los observa, `0.0` los
 ignora, intermedio los lee como negativos débiles (retroalimentación implícita).
+
+### Anclar componentes a las etiquetas conocidas
+
+`Relation.rows` decide qué observaciones entran a la pérdida, así que una entidad sin
+etiqueta no aporta a esa relación y sus componentes quedan libres. Cuando la etiqueta sí
+se conoce, esa información dice además en qué componente debe cargar la entidad.
+
+`supervision` usa eso. Es una matriz booleana de (entidades x componentes) por tipo que
+declara qué componentes puede activar cada entidad; la reconstrucción pasa a ser
+$(G_i \circ L_i)\, S_{ij}\, G_j^T$, siguiendo TS-NMF (MacMillan y Wilson, 2017).
+
+```python
+permitido = np.ones((n_peliculas, 19), dtype=bool)
+permitido[etiquetadas] = Y[etiquetadas] > 0      # solo sus generos
+
+modelo = fuse(relaciones, ranks={"pelicula": 19, ...},
+              supervision={"pelicula": permitido})
+```
+
+Con esto la componente $j$ es el género $j$, en vez de un grupo latente que el backbone
+traduce. Conviene cuando la relación supervisada es la principal fuente de estructura, y
+no cuando compite con otras que aportan estructura distinta. Los dos casos medidos:
+
+| caso | efecto del anclaje |
+|---|---|
+| MovieLens, tres relaciones | predecir -0.060 de AP, agrupar -0.036 de ARI |
+| 20 Newsgroups, una relación | agrupar +0.042 de ARI con 10% supervisado, +0.108 con 50% |
+
+En MovieLens, ratings y elenco traen estructura que no se alinea con el género, y
+forzar las componentes al género la destruye. En texto, la relación documento-término es
+la única y las categorías corresponden al vocabulario, así que el anclaje agrega
+información. Protocolos en `examples/movielens/README.md` y
+`examples/newsgroups/README.md`.
+
+### Los cuatro mecanismos responden preguntas distintas
+
+Se pueden combinar, salvo `rows` con `entry_weights` en la misma relación:
+
+| mecanismo | pregunta que responde |
+|---|---|
+| `Relation.rows` | ¿esta fila fue observada en esta relación? |
+| `Relation.entry_weights` | ¿cuánto pesa esta entrada, y qué son los ceros? |
+| `supervision` | ¿qué componentes puede activar esta entidad? |
+| `empty_rows` | ¿quedó alguna entidad sin observación en ninguna parte? |
+
+Una entidad puede tener datos en una relación y no en otra, y tener etiqueta conocida o
+no; las dos cosas se declaran por separado. Una fila de `supervision` con puros `True`
+significa "no sé en qué componentes carga", que no es lo mismo que "no hay datos".
 
 ## Elegir hiperparámetros
 
@@ -181,10 +261,11 @@ casi todo lo demás (medido en `examples/movielens/`).
 ### Clustering contra predicción
 
 Para **agrupar**, `fuse` con el gauge por columnas (default): en MovieLens sube el
-ARI de 0.464 a 0.741 contra la ruta anterior, y el gauge es lo que hace legible el
-argmax. Para **predecir** un atributo retenido las dos rutas quedan parejas (la
-anterior 0.010 de AP arriba). Los números y protocolos están en
-`examples/movielens/README.md`.
+ARI de 0.464 a 0.741 contra la ruta anterior. El grupo de una fila es el argmax sobre
+las columnas de $G$, así que con columnas de escala arbitraria ese argmax lo decide la
+que más creció durante el ajuste; fijar $\|G_t\|_F^2 = c_t$ las deja comparables. Para
+**predecir** un atributo retenido las dos rutas quedan parejas (la anterior 0.010 de AP
+arriba). Los números y protocolos están en `examples/movielens/README.md`.
 
 ## Evaluar sin engañarse
 
@@ -253,7 +334,8 @@ ajuste.
 
 - El costo por iteración es O(nnz por rango) y la pérdida nunca materializa una
   matriz del tamaño de la relación. Contra la implementación de referencia
-  densificada: 2 a 5 veces menos tiempo y 7 a 10 veces menos memoria.
+  densificada, al crecer las columnas de la relación: entre 2.7 y 5.2 veces menos
+  tiempo y alrededor de 10 veces menos memoria (`examples/movielens/README.md`).
 - La precisión de trabajo sigue a los datos: con todas las matrices en `float32`,
   los factores y buffers quedan en `float32` (la mitad de memoria y 1.35x medido
   en una relación de 200k por 5k con 5M de entradas), mientras la pérdida y los
@@ -284,4 +366,3 @@ ajuste.
 - `examples/lastfm/`: familias mezcladas sobre conteos reales.
 - `docs/oportunidades.md`: lo que falta, con lo medido de cada cosa, y el registro
   de lo que se probó y no funcionó.
-- `docs/diseno-regularizacion.md`: por qué la API es la que es.

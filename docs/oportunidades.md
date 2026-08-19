@@ -1,342 +1,166 @@
 # Oportunidades de mejora
 
-Cada entrada dice qué es, qué se sabe hoy y qué costaría. Se distingue lo que está
-**medido** de lo que es **conjetura**, porque varias de estas ideas suenan razonables y
-ya hay al menos una que se probó y no funcionó.
+Lo que falta, en orden de utilidad, y lo que ya se probó sin resultado. Cada entrada
+distingue lo **medido** de la **conjetura**. Lo que sí está implementado se documenta
+donde se usa: `README.md` para la API, `docs/guia-de-uso.md` para los flujos, los
+`README.md` de `examples/` para las cifras y sus protocolos, y los docstrings de
+`_accumulate_weighted`, `solve_backbone` y del módulo `poisson.py` para las
+derivaciones de las actualizaciones.
 
-## Semi-supervisión
+## Semi-supervisión y pesos
 
-El régimen semi-supervisado es la línea con más recorrido, y está a medio camino.
+**Parada temprana por error de validación.** `holdout_entries` retiene entradas y
+`FusionModel.reconstruct_entries` las puntúa tras el ajuste, así que la curva de
+validación ya es medible por corrida. Falta engancharla al bucle: el `callback` recibe
+`(iteración, pérdida, G)` y no $S$, así que no puede puntuar entradas. Hay que pasarle
+$S$ o incorporar la validación al loop.
 
-### Lo que ya está
+**Selección de rango.** El rango es la palanca principal de regularización y hoy se
+elige por barrido manual. Con la parada temprana anterior, falta el helper que corra el
+barrido y reporte la curva de error de validación contra rango.
 
-**Máscaras de observación por fila** (`Relation.rows`). Sin ellas, cada cero de una
-relación se aprende como una observación real: la entidad no tiene relación con nada.
-Con ellas, se ajusta con todas las entidades presentes y solo las etiquetadas aportan
-su etiqueta.
+**`rows` junto a `entry_weights` en la misma relación.** Hoy declarar las dos levanta
+`ValueError`. Son granularidades distintas de la misma pregunta (qué observaciones
+entran a la pérdida) y no hay razón de fondo para que se excluyan.
 
-Medido: ocultar poniendo ceros da AP 0.468 sobre las filas ocultas contra 0.982 sobre
-las etiquetadas. Con máscara, el contenido de una fila oculta no afecta el ajuste
-(verificado a $10^{-12}$ en `tests/test_fit.py`, y a $0$ exacto en
-`examples/semi_supervised.py`).
+**`transform` con pesos por entrada.** La proyección de entidades nuevas no soporta
+todavía relaciones con `entry_weights`.
 
-**Lo que las máscaras no hacen, medido**: por sí solas no mejoran el acierto. En una
-instancia sintética donde la clase no es recuperable desde la relación observada, las
-tres variantes (relleno cero, relleno uniforme, máscara) quedan cerca del azar, y el
-relleno uniforme a veces gana porque actúa como regularizador crudo. La máscara corrige
-la semántica del modelo, no crea señal donde no la hay. El aporte aparece cuando la
-señal existe: en MovieLens el protocolo enmascarado llega a AP 0.716 contra 0.550 del
-baseline marginal.
+**Barrido del peso de etiquetas con anclaje activado.** El óptimo del peso de la
+relación de etiquetas se midió sin `supervision`; con anclaje puede no ser el mismo.
 
-Eso deja el trabajo real de semi-supervisión en los tres puntos que siguen, no en la
-máscara por fila, que ya está.
+**Consistencia entre el ajuste y el fold-in.** La mitad de la brecha entre el
+rendimiento in-sample y el held-out no es sobreajuste sino desajuste de estimador:
+durante el ajuste, $G_t$ se obtiene minimizando la pérdida completa, mientras que en el
+fold-in se obtiene resolviendo desde las vistas. Son dos estimadores distintos de la
+misma cantidad. Medido sobre el prototipo del análisis: proyectar las mismas entidades
+del entrenamiento desde sus vistas da 0.859 contra 0.981 del ajuste directo, y subir el
+término de consistencia de 0 a 10 baja la brecha de 0.258 a 0.096. El término penaliza
+la distancia entre $G_t$ y lo que el fold-in devolvería, $E_t = [B_t Q_t^{-1}]_+$, con
+$Q_t$ y $B_t$ ya disponibles dentro de la pasada por bloques, así que no agrega ninguna
+pasada sparse. No está implementado en la librería. Conjetura sobre cuándo rendiría:
+cuando la suma de $n_{dst}$ es mucho menor que $n_t$, es decir con muchas entidades
+descritas por pocos atributos. En MovieLens esa condición no se cumple y el held-out
+quedó plano.
 
-### Anclaje de componentes (implementado)
+## Conteos
 
-`supervision` restringe qué componentes latentes puede activar cada entidad, siguiendo
-TS-NMF (MacMillan y Wilson, 2017): la reconstrucción pasa a ser $(G_i \circ L_i) S G_j^T$.
-Es distinto de la máscara por fila, que solo decide qué observaciones entran a la
-pérdida: acá se usa la información de *columna* que la etiqueta aporta.
+**`transform` bajo KL**, y máscaras o pesos por entrada sobre la relación Poisson misma.
+El peso de fondo $w_0$ daría el régimen implícito también en esa familia.
 
-Medido en MovieLens, anclando 19 componentes a los 19 géneros: la fracción de películas
-reservadas cuyo grupo coincide con su género sube de 0.061 a 0.242 (10.9 SE), mientras
-predecir baja 0.060 de AP y agrupar 0.036 de ARI, ambas significativas.
+**Negative binomial, solo con evidencia.** El paso declarado es medir la sobredispersión
+condicional bajo el modelo Poisson ya ajustado (varianza contra media) y agregar el
+parámetro de dispersión por relación solo si Poisson falla de forma visible. Con Poisson
+empatando o perdiendo contra la cuadrática transformada en los tres protocolos medidos
+(`examples/newsgroups/README.md` y `examples/lastfm/README.md`), la línea queda en baja
+prioridad.
 
-En texto pasa lo contrario, y eso aclara cuándo conviene. Sobre 20 Newsgroups, con una
-sola relación documento-término, el anclaje **mejora** de forma monótona: +0.042 de ARI
-con 10% de documentos supervisados (3.8 SE) y +0.108 con 50% (8.5 SE), sobre los
-documentos no supervisados. Es el resultado que reporta el paper.
+## Rendimiento
 
-La diferencia entre los dos casos es la regla práctica: `supervision` conviene cuando la
-relación supervisada es la principal fuente de estructura, y no cuando compite con otras
-que aportan estructura distinta. En MovieLens, ratings y elenco traen señal que no se
-alinea con el género, y forzar las componentes al género la destruye.
+**Sincronizaciones del bucle en GPU.** La suma de los kernels de una iteración proyecta
+38x en la instancia grande y el ajuste completo da 7.6x, así que cerca de dos tercios
+del tiempo se va en costos por iteración fuera de los kernels: lanzamientos,
+sincronizaciones por `float()` y solves chicos en cuSOLVER. El paso siguiente es
+acumular la pérdida en el dispositivo y bajarla cada $k$ iteraciones. Las cifras y el
+detalle de las primitivas están en `examples/gpu/README.md`.
 
-Como referencia, sin supervisar la tri-factorización da ARI 0.185 en 20 Newsgroups y el
-NMF de `sklearn` da 0.184, así que agrupar los términos no cuesta calidad ahí.
+**Poisson y pesos por entrada en GPU.** Hoy se rechazan con error y el ajuste corre en
+CPU.
 
-Queda pendiente barrer el peso de la relación de etiquetas con anclaje activado, porque
-el óptimo puede no ser el mismo que sin él.
+**Actualización en sitio por bloques.** El bucle recorre las filas por bloques, pero
+acumula numerador y denominador completos por tipo, lo que cuesta tres veces el tamaño
+de $G$. Escribir en sitio dentro del bloque baja el pico: el análisis midió 11.28 GB a
+6.71 GB en un caso de 5 millones de filas. Solo es equivalente cuando el tipo aparece en
+un solo lado de sus relaciones, así que hay que detectar el caso y avisar cuando no se
+cumple.
 
-### Máscaras por entrada (implementado)
+**Costo del régimen implícito.** Con delta denso en el patrón, los pesos por entrada
+cuestan 5.2x contra la ruta clásica, dominados por tres pasadas de recolección por
+iteración (actualización de $S$, de $G$ y pérdida) a unos 0.5 Gflop/s contra productos
+BLAS. Las dos vías son cachear entre pasadas la reconstrucción sobre el soporte de delta
+y un kernel compilado para el SDDMM, y se justifican si ese régimen se vuelve el caso
+dominante.
 
-`Relation(entry_weights=..., background=...)` da la granularidad por entrada: cada
-entrada almacenada lleva un peso $w_{ab}$ y las no almacenadas un peso de fondo $w_0$
-(retroalimentación implícita, Hu, Koren y Volinsky). Peso cero oculta la entrada del
-ajuste por todas las vías (pérdida, escala e inicialización, verificado a $10^{-12}$
-en `tests/test_pesos.py`). La primitiva SDDMM que esto exige está en `ops.py`.
+### ROCm y APUs AMD (no probado)
 
-Dos decisiones de la implementación que conviene conocer:
+El mismo backend debería correr sobre GPUs AMD, porque CuPy soporta ROCm mapeando
+cuSPARSE a hipSPARSE, incluido el `spmm` con `transa` que usa la pasada transpuesta.
+Nada de esta entrada está medido: es análisis previo, y ninguno de los números de CUDA
+se traslada.
 
-- La actualización de $G$ usa la fórmula registrada por el análisis (separar el signo
-  de la matriz cuadrática, no del producto), que mantiene el piso positivo del
-  denominador; la versión ingenua diverge a NaN con $w_0 = 0$ y hay un test que cubre
-  ese régimen.
-- $S$ pierde el solve cerrado. Se actualiza con un paso precondicionado amortiguado
-  cuyo punto fijo satisface las ecuaciones normales ponderadas y que se reduce
-  exactamente al solve cerrado con pesos uniformes. Los pesos se normalizan al máximo
-  (la magnitud se pliega en el peso de la relación) para que la iteración quede
-  contraída.
+Qué esperar según el hardware, como conjetura. El loop está limitado por ancho de banda,
+y en una APU la GPU integrada comparte el bus de memoria con la CPU:
 
-La reconstrucción solo se evalúa donde $w_{ab} \neq w_0$, así que el sobrecosto
-depende del régimen. Medido sobre una relación de 200k por 5k con 5M de entradas
-(8 iteraciones, rangos 20 y 15): ruta clásica 5.1 s; entradas retenidas al 10%,
-1.9x; régimen implícito (delta denso en el patrón), 5.2x, dominado por tres pasadas
-de recolección por iteración (actualización de S, de G y pérdida) a ~0.5 Gflop/s
-contra productos BLAS.
+- En una APU de escritorio (DDR5 de dos canales, 90 a 100 GB/s compartidos) la iGPU no
+  tiene ventaja de ancho de banda sobre la CPU; su aporte sería el paralelismo para el
+  gather/scatter irregular del SpMM. La ganancia esperable es del orden del techo medido
+  de paralelizar la CPU (3x), no el 10x a 14x de una GPU discreta.
+- En un Strix Halo / Ryzen AI Max (256 GB/s de LPDDR5X, hasta 128 GB unificados) el caso
+  es la capacidad: la mitad del ancho de banda de una RTX 2080, pero sin techo de VRAM ni
+  costo de transferencia. La memoria unificada también la ve la CPU, así que la capacidad
+  pura ya la aprovecha `device="cpu"`; la iGPU agrega el paralelismo sobre esa misma
+  memoria.
 
-Pendiente de esta línea: soporte en `transform`, combinar `entry_weights` con `rows`
-en la misma relación, cachear entre pasadas la reconstrucción sobre el soporte de
-delta, y un kernel compilado para el SDDMM si el régimen implícito se vuelve el
-caso dominante.
+Receta para probarlo desde una máquina AMD:
 
-### Consistencia entre el ajuste y el fold-in (`alpha_consistency`)
+1. ROCm 7.2 o superior. Las APUs no están en la matriz oficial de soporte pero funcionan
+   en la práctica; en gfx1151 (Strix Halo) hace falta `HSA_OVERRIDE_GFX_VERSION=11.5.1`.
+2. CuPy para ROCm en el venv del proyecto, en lugar del extra `gpu` (que fija
+   `cupy-cuda13x` y no sirve en AMD): los wheels upstream se descontinuaron desde CuPy
+   13.4, pero AMD publica los suyos con
+   `pip install amd-cupy --extra-index-url=https://pypi.amd.com/simple` (ROCm 7), y
+   existe `cupy-rocm-7-0` en PyPI.
+3. Correr `uv run pytest tests/test_gpu.py -v` y `uv run python examples/gpu/primitivas.py`.
+   Los tests validan que `device="gpu"` produce el mismo modelo que la CPU;
+   `primitivas.py` mide las operaciones una a una. El kernel a vigilar es el `spmm` con
+   `transa`: en CUDA es lo que evita que la pasada transpuesta domine, y su rendimiento
+   en hipSPARSE sobre una iGPU es la incógnita principal.
+4. El código no necesita cambios: el apuntador de `CUDA_PATH` no hace nada sin wheels
+   NVIDIA y el chequeo de disponibilidad usa la API que el build HIP también expone. Si
+   los tests pasan, la integración que faltaría es un extra `gpu-rocm` en el `pyproject`
+   y la nota de instalación en el README.
 
-La mitad de la brecha entre el rendimiento in-sample y el held-out no es sobreajuste
-sino desajuste de estimador: durante el ajuste, $G_t$ se obtiene minimizando la pérdida
-completa, mientras que en el fold-in se obtiene resolviendo desde las vistas. Son dos
-estimadores distintos para la misma cantidad.
+Si CuPy sobre ROCm resulta frágil (es de las rutas menos mantenidas del ecosistema AMD),
+el plan B es un backend PyTorch: torch-rocm está mantenido y su CSR por denso va por
+hipSPARSE, pero es un port del loop, no una recompilación, así que solo se justifica con
+una necesidad concreta.
 
-Medido: proyectar las mismas entidades del entrenamiento desde sus vistas da 0.859,
-contra 0.981 del ajuste directo. Al subir el término de consistencia de 0 a 10, la
-brecha baja de 0.258 a 0.096.
-
-El término penaliza la distancia entre $G_t$ y lo que el fold-in devolvería:
-$E_t = [B_t Q_t^{-1}]_+$, con $Q_t$ y $B_t$ ya disponibles dentro de la pasada por
-bloques, así que no agrega ninguna pasada sparse.
-
-Conjetura, no medida: debería ayudar de verdad cuando la suma de $n_{dst}$ es mucho
-menor que $n_t$, es decir cuando hay muchas entidades descritas por pocos atributos.
-En MovieLens esa condición no se cumple y el held-out quedó plano.
-
-### Validación interna con entradas retenidas (implementado)
-
-`holdout_entries(matrix, fraction)` retiene un subconjunto aleatorio de las entradas
-almacenadas (peso cero), y `FusionModel.reconstruct_entries(nombre, filas, columnas)`
-las puntúa tras el ajuste, en unidades originales y en O(k por rango). Con eso el
-error de validación por entradas queda disponible sin reservar entidades completas.
-
-Pendiente: parada temprana por ese error durante el ajuste. El `callback` actual
-recibe (iteración, pérdida, G) pero no S, así que no puede puntuar entradas; hay que
-pasarle S o incorporar la validación al loop.
-
-## Rendimiento del bucle de ajuste
-
-**Medido**: alrededor del 70% del tiempo de una iteración se va en productos
-`scipy.sparse`, que corren en un solo hilo. Los productos van a unos 1.7 GB/s contra
-33.8 GB/s de un `memcpy`, porque están limitados por acceso aleatorio a memoria y no por
-cómputo. El techo real de paralelizarlos que midió el análisis es 3.1x y 2.1x según la
-operación, no el 15x que sugerían las estimaciones ingenuas.
-
-**Pasadas redundantes (implementado)**: la estructura anterior hacía cuatro pasadas
-sparse por matriz y por iteración (solve de $S$, acumulación directa, acumulación
-transpuesta y pérdida) donde bastan dos. El producto $P = M G_{dst}$ se calcula ahora
-una sola vez por iteración, dentro de la pérdida con los factores recién actualizados,
-y queda cacheado en `_FitState.productos`; el solve de $S$ y la acumulación de la
-iteración siguiente lo reutilizan, porque ven los mismos factores. Quedan la pasada de
-la pérdida y la transpuesta. Medido sobre una relación de 200k por 5k con 5M de
-entradas (8 iteraciones, rangos 20 y 15): 1.37x sin máscara y 1.29x con una relación
-adicional enmascarada, con trayectoria bit a bit idéntica. El costo es mantener un
-buffer $(n_{obs}, c_{dst})$ por relación entre iteraciones. Las relaciones con pesos
-por entrada no usan el caché; la de pesos uniformes, que se enruta a la rama clásica,
-lo invalida en cada pérdida para no leer un producto obsoleto.
-
-**Actualización en sitio por bloques**: acumular numerador y denominador completos por
-tipo cuesta tres veces el tamaño de $G$. Calcular por bloques de filas y escribir en
-sitio baja el pico. El análisis midió 11.28 GB a 6.71 GB en un caso de 5 millones de
-filas. La complicación es que solo es equivalente cuando el tipo aparece en un solo lado
-de sus relaciones, así que hay que detectar el caso y avisar cuando no se cumple.
-
-## GPU (implementado)
-
-`fuse(..., device="gpu")` corre el loop de ajuste en una GPU CUDA vía CuPy:
-las relaciones se suben una vez, las pasadas sparse van por cuSPARSE (la
-transpuesta con `spmm(transa=True)`, que dispersa sobre la salida chica en vez
-de recolectar del factor grande y evita la copia transpuesta en VRAM), el
-álgebra de factores por cuBLAS, y el modelo vuelve en numpy. Medido de punta a
-punta contra un hilo de CPU en `float32`, 10 iteraciones
-(`examples/gpu/comparacion.py`): 5.8x en 200k por 5k con 5M de entradas y 7.6x
-en 2M por 10k con 50M, con desvío de la pérdida bajo $10^{-6}$ y 1.25 GB de
-VRAM en la instancia grande. Sin soporte GPU todavía: relaciones Poisson y
-pesos por entrada (se rechazan con error).
-
-Queda margen medido pero no explotado: la suma de los kernels de una iteración
-proyecta 38x en la instancia grande, y el ajuste completo da 7.6x, así que
-cerca de dos tercios del tiempo GPU se va en costos por iteración fuera de los
-kernels (lanzamientos, sincronizaciones por `float()`, solves chicos en
-cuSOLVER). Reducir sincronizaciones (acumular la pérdida en el dispositivo y
-bajarla cada k iteraciones) es el siguiente paso si esa brecha importa.
-
-El spike de primitivas que motivó la integración quedó reproducible en
-`examples/gpu/primitivas.py`; sobre la misma tarjeta:
-
-- SpMM directo $M G_{dst}$: 17x a 21x. GEMMs de factores: 18x a 60x. Update
-  elementwise: 17x a 41x. Instancias: 200k por 5k con 5M de entradas, y 2M por
-  10k con 50M de entradas, rangos 20 y 15.
-- La pasada transpuesta es el punto delicado. Con la transpuesta materializada
-  como CSR queda en 4x, porque recolecta del factor grande entrada por entrada.
-  `cupyx.cusparse.spmm(M, G, transa=True)` sobre el CSR original la baja de
-  336 a 28 ms en la instancia grande (dispersa sobre la salida chica, que cabe
-  en cache) y además evita la copia transpuesta en VRAM. Exige el factor en
-  orden F.
-- Compuesto de primitivas por iteración, usando `transa`: 18x en la instancia
-  chica y 38x en la grande. Contra el techo medido de paralelizar en CPU (3.1x),
-  la GPU queda un orden de magnitud arriba.
-- Transferencia host-device del CSR y factores: 240 ms para 50M de entradas,
-  una vez por ajuste; se amortiza en las iteraciones.
-- VRAM: 1.25 GB de pool para la instancia de 50M de entradas con sus factores y
-  productos. Extrapolando (no medido), la tarjeta de 8 GB acomoda del orden de
-  150M de entradas sin copia transpuesta.
-- Numérica: diferencia relativa de $3 \times 10^{-7}$ en el SpMM directo y
-  $4 \times 10^{-6}$ en `transa` (los atómicos cambian el orden de suma), dentro
-  del régimen `float32` documentado.
-
-La integración quedó como conversión en el borde de `fuse` (vistas de las
-relaciones residentes en GPU, `gpu.py`) más despacho por protocolo: casi todo
-el loop llama `np.*`, que CuPy resuelve vía `__array_function__`; los puntos
-que no despachan (creación de arreglos, `np.eye`) pasan por el helper `_xp`.
-La pérdida se acumula en `float64` como en CPU. En GPU de consumo el `float64`
-corre a 1/32 del `float32`, así que el soporte `float32` es el camino
-recomendado. Nota de instalación: con CUDA 13 los wheels NVIDIA sin sufijo
-instalan en `nvidia/cu13/lib`, que `cuda-pathfinder` 1.6 no revisa; `gpu.py`
-apunta `CUDA_PATH` ahí antes de importar `cupy`, y el extra `gpu` del
-`pyproject` resuelve a `cupy-cuda13x[ctk]`.
-
-## La diferencia de 1.6% entre las dos rutas
+## Diagnóstico abierto de la diferencia entre las dos rutas
 
 `fuse` queda 0.010 de AP por debajo de `dfmf_sparse` en MovieLens, con comparación
-pareada sobre cuatro semillas. Se descartaron por ablación: el gauge de columnas, el
-paso `eta`, `lambda_S`, el fold-in no negativo, el rango de la grilla de pesos (barrida
-de 0.01 a 1000), el solve final de $S$ y la semántica del peso.
+pareada sobre cuatro semillas (`examples/movielens/README.md`). Se descartaron por
+ablación: el gauge de columnas, el paso `eta`, `lambda_S`, el fold-in no negativo, el
+rango de la grilla de pesos (barrida de 0.01 a 1000), el solve final de $S$ y la
+semántica del peso.
 
 **Conjetura**: el orden en que se concatenan los bloques dentro de la inicialización
 NNDSVD, que cambia la SVD y por tanto el punto de partida. Es una propiedad de cómo se
 acomodan los datos, no del método. Verificarlo es barato: fijar el orden de los bloques
 y repetir la comparación.
 
-## Ingesta desde DataFrames (implementado)
+## Otros pendientes
 
-`relations_from_frames` construye todas las relaciones desde tablas de coordenadas
-y resuelve el vocabulario de cada tipo una sola vez (unión ordenada de lo que
-aparece, o una lista fijada), sin pasar nunca por una grilla densa. Las políticas
-hacen ruidosos los desajustes: `on_unknown` para categorías fuera de un
-vocabulario fijado (error con las categorías nombradas, agregarlas al final, o
-descartar esas filas con aviso) y `on_missing` para categorías sin observaciones
-(fila vacía o error). `rows` acepta etiquetas de entidades, y el patrón de
-proyección fija el vocabulario del lado ajustado con `modelo.index`.
+**Distribuciones por entidad a través de cadenas.** Para leer la distribución de un
+atributo al grano más fino (por ejemplo, el modo de cada viaje cuando la relación
+etiquetada vive en otro tipo) hace falta reconstruir una relación que no existe en el
+grafo, encadenando backbones a través de los tipos compartidos:
+$G_{viaje} S_{v,a} (G_a^T G_a) S_{a,m} G_m^T$, con todos los intermedios de tamaño
+rango. No existe en ninguna de las dos rutas. Es la pieza que habilita rebanar una
+actualización por hora o por segmento agregando distribuciones por entidad fina, en vez
+de multiplicar el tipo objetivo.
 
-El wrapper anterior (`base.py`) hacía la alineación de índices con `reindex` sobre un
-DataFrame denso de $n_i \times n_j$, que es la razón por la que no sirve a escala. Sigue
-en el repo por compatibilidad, pero no debería usarse para datos grandes.
+**Criterio de parada por fila en el refinado no negativo.** `nonneg_refine` detiene la
+iteración por el cambio máximo del bloque completo, así que las filas fáciles quedan
+acopladas a la que converge más lento. En `transform` con máscaras cada patrón de
+observación se refina por separado, y el número de iteraciones de un grupo de filas
+puede depender de junto a quiénes se refinó. Con un criterio por fila (congelar las
+filas ya convergidas) el resultado sería independiente de cómo se agrupan. Costo: tocar
+`core.py`, que hoy comparte esta función entre las dos rutas.
 
-## Precisión de los factores (implementado)
-
-La precisión de trabajo sigue a los datos: cuando todas las relaciones llegan en
-`float32`, `fuse` mantiene factores, backbones y buffers de iteración en `float32`,
-acumula la pérdida en `float64` y resuelve los sistemas de tamaño rango en `float64`
-(el resultado vuelve a la precisión de trabajo). Cualquier mezcla de dtypes ajusta en
-`float64`, y la conversión sigue siendo responsabilidad del llamador: convertir dentro
-de `fuse` duplicaría el nnz en memoria.
-
-Medido sobre la relación de 200k por 5k con 5M de entradas: 1.35x sobre la ruta ya
-cacheada (1.80x acumulado con las pasadas redundantes eliminadas), la mitad de memoria
-en factores, y un desvío relativo de la pérdida de $1.9 \times 10^{-7}$ en esa escala.
-La cota medida por el análisis en régimen convergido sigue vigente:
-$4 \times 10^{-5}$ en el producto de `middle`, que es el piso que justifica advertir
-cuando `tol` baja de $10^{-4}$ con datos `float32`. La ruta Poisson y la de pesos por
-entrada no fueron adaptadas ni medidas en `float32`.
-
-## Selección de rango
-
-El rango es la palanca principal de regularización y hoy se elige por barrido manual.
-Con `holdout_entries` más `reconstruct_entries` la curva de error de validación contra
-rango ya es medible por corrida; falta el helper que haga el barrido y reporte la
-curva, y la parada temprana anotada arriba.
-
-## Likelihoods de conteo (Poisson, negative binomial)
-
-Las relaciones típicas del dominio objetivo son conteos sobredispersos, y la pérdida
-cuadrática es la likelihood gaussiana. El orden de trabajo, con criterio de éxito
-declarado antes de cada paso:
-
-1. **Baseline medido** (`examples/newsgroups/conteos.py`): sobre 20 Newsgroups con
-   conteos crudos (índice de dispersión 283), la cuadrática da ARI 0.026;
-   estabilizar varianza sube a 0.103 con sqrt y 0.114 con log1p; TF-IDF llega a
-   0.185. La referencia a ganar para una likelihood de conteo es TF-IDF, no los
-   conteos crudos, y TF-IDF no es estabilización de varianza sino reponderado por
-   especificidad: un modelo Poisson que no incorpore ese reponderado parte en
-   desventaja. Las transformaciones ganadoras quedaron después declarables en el
-   modelo (`Relation(preprocess=...)`), con el estado (idf) persistido y reaplicado
-   a datos no vistos por `transform` y `loss`.
-2. **Poisson/KL por relación (implementado)**: `Relation(family="poisson")` despacha
-   a un loop KL propio (`poisson.py`), con actualizaciones multiplicativas cuyo
-   numerador y denominador se acumulan entre las relaciones de cada tipo (el paso
-   conjunto desciende la pérdida conjunta), $S$ no negativo, el gauge compensado en
-   $S$ y la pérdida como razón de desviación contra el modelo nulo de tasa
-   constante. El experimento contra la referencia cuadrática está en
-   `examples/newsgroups/poisson_vs_cuadratica.py`.
-   **Medido, y el criterio no se cumplió**: Poisson sobre conteos crudos da ARI
-   0.113 (el nivel de log1p bajo la cuadrática, 0.114); con columnas escaladas por
-   idf sube a 0.151 y empata estadísticamente con la referencia (-1.3 SE); sobre TF-IDF
-   normalizado degenera. La likelihood logra lo mismo que la transformación, el
-   reponderado por idf es lo que mejora bajo ambas pérdidas, y no
-   hay razón medida para preferir Poisson en agrupamiento de texto. El paso
-   siguiente (familias mezcladas) se midió aparte y tampoco superó a la
-   cuadrática; ver abajo.
-   **Familias mezcladas: implementado y medido.** Un ajuste puede combinar relaciones
-   Poisson y gaussianas compartiendo factores (la línea de collective matrix
-   factorization de Singh y Gordon; verificar la referencia antes de citarla). El
-   paso conjunto minimiza la suma de los majorizantes de ambas familias en forma
-   cerrada (raíz positiva de una cuadrática por entrada) y se reduce exactamente a
-   cada regla pura en los casos extremos. Medido en Last.fm (`examples/lastfm/`),
-   con criterio declarado (ganar por 2 SE en AP de tags retenidos): el brazo
-   mezclado (Poisson crudo más etiquetas gaussianas) pierde contra la monofamilia
-   con log1p por $-0.050 \pm 0.017$ ($-2.9$ SE), con ambos brazos sobre el
-   baseline de popularidad. La corrida encontró un defecto real, corregido: sin
-   calibrar el gradiente KL por la desviación nula de su relación, el término de
-   conteos domina numéricamente a cualquier gaussiana y el peso entre familias no tiene efecto.
-   Conclusión de la línea de conteos completa: en dos datasets y tres protocolos,
-   modelar conteos con su likelihood nunca superó a transformarlos bajo la
-   cuadrática. La infraestructura queda (familia por relación, calibración entre
-   familias) para cuando un caso la exija por razones de modelo (tasas,
-   interpretación generativa), no de accuracy.
-   Pendiente de esta línea: `transform` bajo KL, y máscaras o pesos por entrada
-   sobre la relación Poisson misma (el peso de fondo $w_0$ daría el régimen
-   implícito también aquí).
-3. **Negative binomial solo con evidencia**: medir la sobredispersión condicional
-   bajo el modelo Poisson ya ajustado (varianza contra media) y agregar el parámetro
-   de dispersión por relación solo si Poisson falla de forma visible. Con Poisson
-   empatando o perdiendo contra la cuadrática transformada en todos los protocolos
-   medidos, esta línea queda en baja prioridad.
-
-## Distribuciones por entidad a través de cadenas
-
-Para leer la distribución de un atributo a nivel del grano más fino (por ejemplo,
-el modo de cada viaje cuando la relación etiquetada vive en otro tipo), hace falta
-reconstruir una relación que no existe en el grafo, encadenando backbones a través
-de los tipos compartidos: $G_{viaje} S_{v,a} (G_a^T G_a) S_{a,m} G_m^T$, con todos
-los intermedios de tamaño rango. El wrapper antiguo lo hacía (`relation_profiles`
-en `base.py`, densificado); falta la versión O(n por rango) en la API actual. Es
-la pieza que habilita rebanar una actualización por hora o por segmento al agregar
-distribuciones por entidad fina, en vez de multiplicar el tipo objetivo. El
-protocolo de reconstrucción-como-actualización que la motiva vive en el análisis
-que consume la librería, no en este repo.
-
-## Criterio de parada por fila en el refinado no negativo
-
-`nonneg_refine` detiene la iteración por el cambio máximo del bloque completo, así que
-las filas fáciles quedan acopladas a la fila que converge más lento. En `transform` con
-máscaras cada patrón de observación se refina por separado, y el número de iteraciones
-de un grupo de filas puede depender de junto a quiénes se refinó. Con un criterio por
-fila (congelar las filas ya convergidas) el resultado sería independiente de cómo se
-agrupan. Costo: tocar `core.py`, que hoy comparte esta función entre las dos rutas.
-
-## Integración continua
-
-Un workflow de GitHub Actions que corra `pytest` en cada push. La suite corre sin
-descargas ni credenciales, la comparación con scikit-fusion usa trazas guardadas
-en el repo (sin dependencia) y los tests de GPU se saltan solos sin tarjeta, así
-que no hay bloqueo técnico. Pendiente por decisión del mantenedor.
+**Integración continua.** Un workflow de GitHub Actions que corra `pytest` en cada push.
+La suite corre sin descargas ni credenciales, la comparación con scikit-fusion usa
+trazas guardadas en el repo y los tests de GPU se saltan solos sin tarjeta, así que no
+hay bloqueo técnico. Pendiente por decisión del mantenedor.
 
 ## Lo que se probó y no funcionó
 
@@ -356,6 +180,15 @@ Registrado para no volver a intentarlo sin una razón nueva.
 - **`LinearOperator` para abaratar la inicialización**: no redujo la memoria, porque el
   consumo estaba en el subespacio de Krylov de ARPACK y no en la concatenación. La
   solución que sí funcionó fue resolver por el lado chico.
-- **KL sobre TF-IDF normalizado por fila**: la KL modela masa y la normalización L2
-  la elimina; el ajuste degenera en 2 iteraciones con ARI 0.000. Los pesos por
-  columna (idf) sí son compatibles con KL, escalando la matriz.
+- **KL sobre TF-IDF normalizado por fila**: la KL modela masa y la normalización L2 la
+  elimina; el ajuste degenera en 2 iteraciones con ARI 0.000. Los pesos por columna (idf)
+  sí son compatibles con KL, escalando la matriz.
+- **Una jerarquía de clases para la configuración** (tipos `FusionData`, `Scale`,
+  `Block`, `Trace` además de `Relation`): sube el costo de entrada sin resolver ningún
+  defecto medido. La entrada mínima desde un dict de matrices dispersas es el patrón
+  principal y desaparecía.
+- **Paralelismo agresivo de las pasadas sparse**: el techo medido es 3.1x y 2.1x según
+  la operación, no el 15x que sugerían las estimaciones ingenuas. Los productos corren a
+  1.7 GB/s contra 33.8 GB/s de un `memcpy` porque están limitados por acceso aleatorio a
+  memoria, y a rango alto el término dominante ni siquiera es el sparse sino el
+  elementwise sobre arreglos de $(n_t, c_t)$.
