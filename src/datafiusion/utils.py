@@ -1,5 +1,4 @@
 import numpy as np
-import pandas as pd
 import scipy.sparse as sp
 
 
@@ -65,40 +64,6 @@ def normalize_relations(R, weights=None):
     return out, scales
 
 
-def labels_to_relation(labels, classes=None, fill=0.0):
-    """One-hot encode a label Series into a (entity, class) relation.
-
-    Rows where `labels` is NaN are written as `fill`. `fill=0.0` reads as
-    "no class membership", which biases the factorization away from any
-    class for unlabeled rows. `fill=1.0/n_classes` reads as a uniform prior.
-    Neither is the right thing semantically. For proper unlabeled handling,
-    use `fit` with a row observation mask (`Relation.rows` or the `masks`
-    argument) so unlabeled rows drop out of the loss. Still, for sparse
-    labeling the bias is often dominated by signal from other relations.
-
-    Parameters
-    ----------
-    labels : pd.Series
-        Index labels the entities; values are class names (NaN if unknown).
-    classes : sequence or None
-        Class names in the order they should appear as columns. If None,
-        uses sorted unique non-null values from `labels`.
-    fill : float
-        Value for unlabeled rows. Default 0.
-
-    Returns
-    -------
-    pd.DataFrame of shape (len(labels), n_classes).
-    """
-    Y = pd.get_dummies(labels, dtype=float)
-    if classes is not None:
-        Y = Y.reindex(columns=list(classes), fill_value=0.0)
-    unlabeled = labels.isna()
-    if unlabeled.any() and fill != 0.0:
-        Y.loc[unlabeled] = fill
-    return Y
-
-
 def holdout_entries(matrix, fraction=0.1, random_state=None):
     """Pick a random subset of stored entries to hold out of a fit.
 
@@ -120,32 +85,3 @@ def holdout_entries(matrix, fraction=0.1, random_state=None):
     pesos[elegidos] = 0.0
     filas = np.repeat(np.arange(M.shape[0]), np.diff(M.indptr))[elegidos]
     return pesos, (filas, M.indices[elegidos].copy())
-
-
-def ensure_columns(df, columns, fill_value=np.nan):
-    df = df.copy()
-
-    if isinstance(columns, pd.Series):
-        values = columns.values
-    elif isinstance(columns, pd.DataFrame):
-        values = columns.columns.values
-    else:
-        values = list(columns)
-
-    for col in values:
-        if not col in df.columns:
-            df[col] = fill_value
-
-    df = df[values].copy()
-    return df
-
-
-def ensure_index(df, index):
-    if isinstance(index, pd.Series):
-        values = index.values
-    elif isinstance(index, pd.DataFrame):
-        values = index.index.values
-    else:
-        values = list(index)
-
-    return pd.DataFrame(index=values).join(df, how="left").copy()
