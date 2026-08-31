@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="siete-colores.png">
+  <img src="siete-colores-claro.png" alt="data-fiusion" width="420">
+</picture>
+
 # data-fiusion
 
 Factorización tri-no negativa de matrices dispersas para fusión de datos, siguiendo el
@@ -201,7 +206,8 @@ reporte completo, y la referencia se regenera con
 
 ## Licencia
 
-MIT. Ver `LICENSE`.
+MIT. Ver `LICENSE`. La licencia cubre el código; la ilustración del
+logo, un siete colores (*Tachuris rubrigaster*), es de Colibrichito.
 
 ## Referencias
 
