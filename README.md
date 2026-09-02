@@ -27,14 +27,18 @@ que es lo que hace que las fuentes se informen entre sí.
 
 ## Instalación
 
+El paquete no está publicado en PyPI, así que se instala desde el repositorio
+con `uv`:
+
 ```bash
-git clone <repo-url> data-fiusion
-cd data-fiusion
-uv venv
-uv pip install -e .
+uv add "data-fiusion @ git+https://github.com/PLUMAS-research/data-fiusion"
 ```
 
-Opcional: `uv pip install -e ".[viz]"` para el diagrama de relaciones.
+Opcional, para el diagrama de relaciones:
+
+```bash
+uv add "data-fiusion[viz] @ git+https://github.com/PLUMAS-research/data-fiusion"
+```
 
 ### GPU
 
@@ -44,7 +48,7 @@ En sistemas sin GPU no hay que instalar ni configurar nada: el default `device="
 nunca importa cupy.
 
 ```bash
-uv pip install -e ".[gpu]"    # o: uv sync --extra gpu
+uv add "data-fiusion[gpu] @ git+https://github.com/PLUMAS-research/data-fiusion"
 ```
 
 - Requiere un driver NVIDIA con soporte CUDA 13 (verificable con `nvidia-smi`). El extra
