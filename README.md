@@ -218,3 +218,8 @@ logo, un siete colores (*Tachuris rubrigaster*), es de Colibrichito.
 - Zitnik, M. y Zupan, B. (2015). Data fusion by matrix factorization. IEEE Transactions on Pattern Analysis and Machine Intelligence, 37(1), 41 a 53.
 - MacMillan, K. y Wilson, J. D. (2017). Topic supervised non-negative matrix factorization. arXiv:1706.05084. (Datos tomados del preprint; verificar si hubo publicación posterior en revista antes de citarlo en un paper.)
 - Boutsidis, C. y Gallopoulos, E. (2008). SVD based initialization: A head start for nonnegative matrix factorization. Pattern Recognition, 41(4), 1350 a 1362.
+
+## Financiamiento
+
+Este trabajo fue financiado por el proyecto LOICA, ANID Fondecyt Regular
+#1261835.
