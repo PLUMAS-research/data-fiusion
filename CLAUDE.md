@@ -64,9 +64,9 @@ One module per concern, with the API consolidated around patterns from real use.
 - If you touch the SVD path, keep `_svd_flip_u` applied to the returned `U`. The reproducibility test in `tests/test_compare_skfusion.py` will silently give slow convergence if signs flip across processes.
 - The closed-form `_solve_S` is the unconstrained least-squares solution; if you add non-negativity to `S` later, swap the solve for a multiplicative update and keep the outer loop.
 
-## Comparison with scikit-fusion (`~/repositories/scikit-fusion`)
+## Comparison with scikit-fusion
 
-scikit-fusion is no longer installed in the venv: the live parity validation is done and the test compares against its stored traces (see Commands). The checkout is still the data source for the MovieLens examples (`MOVIELENS_DIR`) and what `examples/movielens/escala.py` and `equivalencia.py` benchmark against when it is installed. The design differences that motivated this library:
+scikit-fusion is no longer installed in the venv: the live parity validation is done and the test compares against its stored traces (see Commands). A local scikit-fusion install is still the data source for the MovieLens examples (`MOVIELENS_DIR`) and what `examples/movielens/escala.py` and `equivalencia.py` benchmark against when it is installed. The design differences that motivated this library:
 
 - scikit-fusion stores relations as dense `numpy.ndarray` (or `numpy.ma.MaskedArray` for missing data). `data-fiusion` stores them as `scipy.sparse.csr_matrix` and uses dense factors only.
 - scikit-fusion uses `FusionGraph` / `ObjectType` / `Relation` as user-facing primitives. `data-fiusion` uses plain dicts keyed by `(src_type, dst_type)`.
@@ -136,7 +136,7 @@ and the READMEs under `examples/`.
 Small end-to-end test with complete ground truth, meant to diagnose the library
 without the complexity of a real domain. Uses the MovieLens copy that ships with
 scikit-fusion (6.5 MB, no download). With the package no longer installed, point
-`MOVIELENS_DIR` at the checkout's `skfusion/datasets/data/movielens`. Three
+`MOVIELENS_DIR` at a scikit-fusion checkout's `skfusion/datasets/data/movielens`. Three
 relations with `pelicula` as source type: ratings, genre labels, cast. Movies
 split 60/20/20; validation and test movies stay out of the fit entirely, so the
 label cannot leak. `examples/movielens/README.md` has the numbers.
